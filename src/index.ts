@@ -1,4 +1,4 @@
-import { runCrawlLoop, runCrawlLoopUntilPaused } from "./crawl";
+import { handleCrawlChainRequest, runCrawlBurst, runCrawlLoop, runCrawlLoopUntilPaused } from "./crawl";
 import {
   bumpMaxPlaces,
   commentsUrl,
@@ -132,7 +132,7 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/scrape/start") {
         const result = await startScrape(env);
-        ctx.waitUntil(runCrawlLoopUntilPaused(env));
+        ctx.waitUntil(runCrawlLoopUntilPaused(env, ctx));
         await emit(
           writeDb(env),
           result.resumed
@@ -150,7 +150,7 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/scrape/resume") {
         const result = await resumeScrape(env);
-        ctx.waitUntil(runCrawlLoopUntilPaused(env));
+        ctx.waitUntil(runCrawlLoopUntilPaused(env, ctx));
         await emit(writeDb(env), "scrape resumed");
         return json({ ok: true, ...result });
       }
@@ -159,7 +159,7 @@ export default {
         const state = await getState(readDb(env));
         if (state.paused) {
           const result = await resumeScrape(env);
-          ctx.waitUntil(runCrawlLoopUntilPaused(env));
+          ctx.waitUntil(runCrawlLoopUntilPaused(env, ctx));
           await emit(writeDb(env), "scrape resumed");
           return json({ ok: true, ...result, action: "resume" });
         }
@@ -241,6 +241,10 @@ export default {
         return json({ ok: true, job_id: jid });
       }
 
+      if (request.method === "POST" && pathname === "/api/internal/crawl-chain") {
+        return handleCrawlChainRequest(request, env, ctx);
+      }
+
       return json({ error: "not found" }, 404);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -254,7 +258,7 @@ export default {
     if (state.paused || state.storage_handbrake) return;
     const owner = `cron-${Date.now()}`;
     if (!(await tryAcquireCrawlLease(db, owner, 55))) return;
-    ctx.waitUntil(runCrawlLoop(env, { seed: false, maxSteps: 40, owner }));
+    ctx.waitUntil(runCrawlBurst(env, ctx, { owner }));
   },
 } satisfies ExportedHandler<Env>;
 

@@ -18,6 +18,9 @@ import type {
 
 const GUEST = "https://guest.park4night.com/services/V4.1";
 
+/** Stay under Workers Free 50 D1 statements per invocation (~3 stmts/place). */
+export const INGEST_CHUNK_SIZE = 6;
+
 /** D1 free tier is 5 GB — stop scraping before we hit the wall. */
 export const DB_SIZE_LIMIT_BYTES = Math.floor(4.5 * 1024 * 1024 * 1024);
 
@@ -118,6 +121,28 @@ export async function enqueueJob(
   return id;
 }
 
+export async function enqueueJobsBatch(
+  db: D1Database,
+  items: { kind: JobKind; payload: Record<string, unknown>; id: string }[],
+): Promise<number> {
+  if (items.length === 0) return 0;
+  const t = nowIso();
+  for (let i = 0; i < items.length; i += 15) {
+    const slice = items.slice(i, i + 15);
+    await db.batch(
+      slice.map((item) =>
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO jobs (id, kind, payload_json, status, attempts, created_at, updated_at)
+             VALUES (?, ?, ?, 'pending', 0, ?, ?)`,
+          )
+          .bind(item.id, item.kind, JSON.stringify(item.payload), t, t),
+      ),
+    );
+  }
+  return items.length;
+}
+
 export async function claimJob(db: D1Database, owner: string, leaseSeconds = 120): Promise<JobRow | null> {
   const state = await getState(db);
   if (state.paused || state.storage_handbrake) return null;
@@ -128,6 +153,7 @@ export async function claimJob(db: D1Database, owner: string, leaseSeconds = 120
       `SELECT * FROM jobs
        WHERE status = 'pending' AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY CASE kind
+         WHEN 'ingest_chunk' THEN 0
          WHEN 'filter_cell' THEN 1
          WHEN 'place_reviews' THEN 2
          WHEN 'rescrape_place' THEN 3
@@ -262,16 +288,13 @@ function placeFromApi(place: PlaceApi): {
   };
 }
 
-async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: string): Promise<boolean> {
-  const p = placeFromApi(place);
-  const existing = await db
-    .prepare("SELECT place_id FROM places WHERE place_id = ?")
-    .bind(p.placeId)
-    .first();
-
-  const detailJson = JSON.stringify(slimPlace(place));
-
-  const stmts = [
+function placeUpsertStatements(
+  db: D1Database,
+  p: ReturnType<typeof placeFromApi>,
+  detailJson: string,
+  scrapedAt: string,
+): D1PreparedStatement[] {
+  return [
     db
       .prepare(
         `INSERT INTO places (
@@ -314,6 +337,17 @@ async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: stri
       .prepare("INSERT INTO places_fts (place_id, name, city, description) VALUES (?, ?, ?, ?)")
       .bind(p.placeId, p.name, p.city ?? "", p.description),
   ];
+}
+
+async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: string): Promise<boolean> {
+  const p = placeFromApi(place);
+  const existing = await db
+    .prepare("SELECT place_id FROM places WHERE place_id = ?")
+    .bind(p.placeId)
+    .first();
+
+  const detailJson = JSON.stringify(slimPlace(place));
+  const stmts = placeUpsertStatements(db, p, detailJson, scrapedAt);
 
   if (existing) {
     await db.batch([
@@ -331,27 +365,46 @@ async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: stri
   return !existing;
 }
 
-export async function ingestNewPlacesFromFilter(
+async function existingPlaceIdsSet(db: D1Database, ids: string[]): Promise<Set<string>> {
+  const found = new Set<string>();
+  for (let i = 0; i < ids.length; i += 50) {
+    const slice = ids.slice(i, i + 50);
+    if (slice.length === 0) continue;
+    const placeholders = slice.map(() => "?").join(",");
+    const res = await db
+      .prepare(`SELECT place_id FROM places WHERE place_id IN (${placeholders})`)
+      .bind(...slice)
+      .all<{ place_id: string }>();
+    for (const row of res.results ?? []) found.add(row.place_id);
+  }
+  return found;
+}
+
+/** Split a filter response into small ingest jobs — filter_cell must stay under 50 D1 stmts. */
+export async function planAndEnqueueFilterIngest(
   db: D1Database,
   places: PlaceApi[],
-  wireBytes: number,
-): Promise<{ newCount: number; newIds: string[]; knownSeen: PlaceApi[] }> {
+  meta: { lat: number; lng: number; cellId?: string | null; passId?: number | null },
+): Promise<{ newCount: number; knownSeen: PlaceApi[]; chunks: number }> {
   const state = await getState(db);
   if (state.storage_handbrake) {
-    return { newCount: 0, newIds: [], knownSeen: places };
+    return { newCount: 0, knownSeen: places, chunks: 0 };
   }
+
   const cap = state.max_places;
-  const scrapedAt = nowIso();
-  let known = await placesCount(db);
+  const known = await placesCount(db);
   let slots = Math.max(0, cap - known);
+
+  const existingSet = await existingPlaceIdsSet(
+    db,
+    places.map((p) => String(p.id)),
+  );
 
   const fresh: PlaceApi[] = [];
   const knownSeen: PlaceApi[] = [];
-
   for (const place of places) {
     const placeId = String(place.id);
-    const existing = await db.prepare("SELECT place_id FROM places WHERE place_id = ?").bind(placeId).first();
-    if (existing) {
+    if (existingSet.has(placeId)) {
       knownSeen.push(place);
       continue;
     }
@@ -360,24 +413,40 @@ export async function ingestNewPlacesFromFilter(
     slots -= 1;
   }
 
-  for (const place of fresh) {
-    await upsertPlaceBatch(db, place, scrapedAt);
-    const p = placeFromApi(place);
-    await emitPin(db, {
-      id: p.placeId,
-      lat: p.lat,
-      lng: p.lng,
-      t: typeToInt(p.type),
-      type: p.type,
-      name: p.name,
-      updated_at: scrapedAt,
+  if (fresh.length === 0) {
+    return { newCount: 0, knownSeen, chunks: 0 };
+  }
+
+  const scrapedAt = nowIso();
+  const cellKey = meta.cellId ?? `${meta.lat},${meta.lng}`;
+  const passKey = meta.passId != null ? String(meta.passId) : "0";
+  const jobs: { kind: JobKind; payload: Record<string, unknown>; id: string }[] = [];
+
+  for (let i = 0; i < fresh.length; i += INGEST_CHUNK_SIZE) {
+    const chunk = fresh.slice(i, i + INGEST_CHUNK_SIZE);
+    jobs.push({
+      kind: "ingest_chunk",
+      id: `ingest:${passKey}:${cellKey}:${i}`,
+      payload: { places: chunk, scraped_at: scrapedAt },
     });
-    // Defer review fetches during Europe pass — one filter response can carry 100+ places.
-    if (!state.pass_mode) {
-      await enqueueJob(db, "place_reviews", { place_id: p.placeId }, `reviews:${p.placeId}`, {
-        requeueIfDone: true,
-      });
-    }
+  }
+
+  await enqueueJobsBatch(db, jobs);
+  return { newCount: fresh.length, knownSeen, chunks: jobs.length };
+}
+
+/** Ingest up to INGEST_CHUNK_SIZE new places in one job (no per-pin run_events). */
+export async function ingestPlacesChunk(db: D1Database, places: PlaceApi[], scrapedAt: string): Promise<number> {
+  if (places.length === 0) return 0;
+
+  const stmts: D1PreparedStatement[] = [];
+  for (const place of places) {
+    const p = placeFromApi(place);
+    stmts.push(...placeUpsertStatements(db, p, JSON.stringify(slimPlace(place)), scrapedAt));
+  }
+
+  for (let i = 0; i < stmts.length; i += 45) {
+    await db.batch(stmts.slice(i, i + 45));
   }
 
   const count = await placesCount(db);
@@ -386,15 +455,28 @@ export async function ingestNewPlacesFromFilter(
     .bind(count, scrapedAt)
     .run();
 
-  await emit(db, `filter ingest: +${fresh.length} new (wire=${wireBytes}B, archive=${count})`, "info", {
+  return places.length;
+}
+
+export async function ingestNewPlacesFromFilter(
+  db: D1Database,
+  places: PlaceApi[],
+  wireBytes: number,
+): Promise<{ newCount: number; newIds: string[]; knownSeen: PlaceApi[] }> {
+  const { newCount, knownSeen } = await planAndEnqueueFilterIngest(db, places, {
+    lat: 0,
+    lng: 0,
+    cellId: null,
+    passId: null,
+  });
+  await emit(db, `filter ingest queued: +${newCount} new (wire=${wireBytes}B)`, "info", {
     wire_bytes: wireBytes,
-    new: fresh.length,
+    new: newCount,
     known_seen: knownSeen.length,
   });
-
   return {
-    newCount: fresh.length,
-    newIds: fresh.map((p) => String(p.id)),
+    newCount,
+    newIds: [],
     knownSeen,
   };
 }
@@ -1025,9 +1107,10 @@ export function commentsUrl(placeId: string): string {
 let lastOutboundFetchAt = 0;
 
 function rateLimitMs(env: Env, state?: CrawlerState): number {
-  const fromEnv = Number(env.REQUEST_DELAY_MS || 750);
+  const fromEnv = Number(env.REQUEST_DELAY_MS || 200);
+  if (fromEnv > 0) return Math.max(150, fromEnv);
   const fromDb = state?.request_delay_ms;
-  return Math.max(750, fromDb || fromEnv);
+  return Math.max(150, fromDb || 200);
 }
 
 /** One outbound HTTP request at a time globally, with cooldown after each completes. */
@@ -1076,6 +1159,16 @@ export async function tryAcquireCrawlLease(db: D1Database, owner: string, leaseS
     .bind(owner, until, nowIso(), now, owner)
     .run();
   return (res.meta.changes ?? 0) > 0;
+}
+
+export async function releaseCrawlLease(db: D1Database, owner: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE crawler_state SET crawl_lease_owner = NULL, crawl_lease_until = NULL, updated_at = ?
+       WHERE id = 1 AND crawl_lease_owner = ?`,
+    )
+    .bind(nowIso(), owner)
+    .run();
 }
 
 function outboundGapMs(env: Env, state: CrawlerState, url: string): number {

@@ -8,10 +8,13 @@ export interface Env {
   DEFAULT_LNG: string;
   TILES_PUBLIC_URL?: string;
   USE_D1_SESSIONS?: string;
+  /** Shared secret for worker self-chain bursts (keeps crawl running past 30s free-tier limit). */
+  CRAWL_CHAIN_SECRET?: string;
 }
 
-/** Job kinds — claim order prefers discovery over refresh/reviews. */
+/** Job kinds — claim order prefers ingest chunks, then discovery, then refresh/reviews. */
 export type JobKind =
+  | "ingest_chunk"
   | "filter_cell"
   | "place_refresh"
   | "place_reviews"

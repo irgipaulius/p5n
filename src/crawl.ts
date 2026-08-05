@@ -7,13 +7,15 @@ import {
   fetchJson,
   filterUrl,
   getState,
-  ingestNewPlacesFromFilter,
+  ingestPlacesChunk,
   ingestReviews,
   markCellDone,
   markCellError,
   placesCount,
+  planAndEnqueueFilterIngest,
   reclaimStaleLeases,
   refreshKnownPlace,
+  releaseCrawlLease,
   resolveJob,
   slimPlace,
   tryAcquireCrawlLease,
@@ -49,13 +51,18 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
       if (parsed.status !== "OK") throw new Error(`filter not OK: ${body.slice(0, 200)}`);
 
       const places = parsed.lieux ?? [];
-      const { newCount, knownSeen } = await ingestNewPlacesFromFilter(db, places, body.length);
+      const { newCount, knownSeen, chunks } = await planAndEnqueueFilterIngest(db, places, {
+        lat,
+        lng,
+        cellId,
+        passId,
+      });
       const known = await placesCount(db);
       await emit(
         db,
-        `filter ${lat},${lng}: wire=${places.length} +${newCount} new (archive=${known}) mode=${mode}`,
+        `filter ${lat},${lng}: wire=${places.length} +${newCount} new (${chunks} chunks, archive=${known}) mode=${mode}`,
         "info",
-        { http_status: status, wire_bytes: body.length, new: newCount },
+        { http_status: status, wire_bytes: body.length, new: newCount, chunks },
       );
 
       if (mode !== "new_only") {
@@ -84,6 +91,17 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
       }
       throw err;
     }
+    return;
+  }
+
+  if (job.kind === "ingest_chunk") {
+    const places = payload.places as PlaceApi[];
+    const scrapedAt = String(payload.scraped_at || new Date().toISOString());
+    if (!Array.isArray(places) || places.length === 0) throw new Error("ingest_chunk missing places");
+
+    const n = await ingestPlacesChunk(db, places, scrapedAt);
+    const known = await placesCount(db);
+    await emit(db, `ingest chunk +${n} (archive=${known})`, "info", { new: n });
     return;
   }
 
@@ -143,7 +161,7 @@ export async function processOneJob(env: Env, owner: string): Promise<"did_work"
 
 export async function runCrawlLoop(
   env: Env,
-  opts: { maxSteps?: number; seed?: boolean; owner?: string } = {},
+  opts: { maxSteps?: number; seed?: boolean; owner?: string; maxMs?: number } = {},
 ): Promise<{ steps: number; stopped: string }> {
   const db = writeDb(env);
   const lat = Number(env.DEFAULT_LAT || 41.688908);
@@ -153,12 +171,14 @@ export async function runCrawlLoop(
   if (reclaimed) await emit(db, `reclaimed ${reclaimed} stale lease(s)`);
 
   const owner = opts.owner ?? `worker-${crypto.randomUUID().slice(0, 8)}`;
-  if (!(await tryAcquireCrawlLease(db, owner, 120))) {
+  if (!(await tryAcquireCrawlLease(db, owner, 40))) {
     return { steps: 0, stopped: "no_lease" };
   }
   const maxSteps = opts.maxSteps ?? 200;
+  const deadline = opts.maxMs != null ? Date.now() + opts.maxMs : null;
   const state0 = await getState(db);
 
+  try {
   if (opts.seed === true) {
     const known = await placesCount(db);
     const pending = await db.prepare(
@@ -176,7 +196,7 @@ export async function runCrawlLoop(
   let steps = 0;
   let idle = 0;
 
-  while (steps < maxSteps) {
+  while (steps < maxSteps && (deadline == null || Date.now() < deadline)) {
     const result = await processOneJob(env, owner);
     if (result === "paused") return { steps, stopped: "paused" };
     if (result === "idle") {
@@ -200,33 +220,76 @@ export async function runCrawlLoop(
     steps += 1;
   }
 
-  await emit(db, `crawl loop hit maxSteps=${maxSteps}`);
-  return { steps, stopped: "max_steps" };
+  await emit(db, deadline != null && Date.now() >= deadline ? `crawl loop time budget (${opts.maxMs}ms)` : `crawl loop hit maxSteps=${maxSteps}`);
+  return { steps, stopped: deadline != null && Date.now() >= deadline ? "time_budget" : "max_steps" };
+  } finally {
+    await releaseCrawlLease(db, owner);
+  }
 }
 
-/** Background driver: one job at a time until paused, pass complete, or handbrake. */
-export async function runCrawlLoopUntilPaused(env: Env): Promise<void> {
+const CRAWL_BURST_MS = 25_000;
+
+async function pendingJobCount(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'")
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** Kick another Worker invocation so scraping continues past the ~30s free-tier wall. */
+export async function scheduleCrawlChain(env: Env, ctx: ExecutionContext, result: { stopped: string }): Promise<void> {
+  if (result.stopped !== "time_budget" && result.stopped !== "max_steps") return;
+
+  const db = writeDb(env);
+  const state = await getState(db);
+  if (state.paused || state.storage_handbrake) return;
+  if ((await pendingJobCount(db)) === 0) return;
+
+  const secret = env.CRAWL_CHAIN_SECRET;
+  if (!secret) return;
+
+  const base = (env.TILES_PUBLIC_URL || "https://park5night.hyperreader.eu").replace(/\/$/, "");
+  await fetch(`${base}/api/internal/crawl-chain`, {
+    method: "POST",
+    headers: { "X-Crawl-Chain": secret },
+  }).catch(() => undefined);
+}
+
+/** One burst of jobs, then chain another invocation if work remains. */
+export async function runCrawlBurst(
+  env: Env,
+  ctx: ExecutionContext,
+  opts: { seed?: boolean; owner?: string } = {},
+): Promise<{ steps: number; stopped: string }> {
+  const owner = opts.owner ?? `burst-${crypto.randomUUID().slice(0, 8)}`;
+  const result = await runCrawlLoop(env, {
+    seed: opts.seed ?? false,
+    maxSteps: 500,
+    maxMs: CRAWL_BURST_MS,
+    owner,
+  });
+  await scheduleCrawlChain(env, ctx, result);
+  return result;
+}
+
+export async function handleCrawlChainRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (request.headers.get("X-Crawl-Chain") !== env.CRAWL_CHAIN_SECRET) {
+    return new Response(JSON.stringify({ error: "forbidden" }), { status: 403, headers: { "content-type": "application/json" } });
+  }
+  const owner = `chain-${Date.now()}`;
+  ctx.waitUntil(
+    (async () => {
+      await runCrawlBurst(env, ctx, { owner });
+    })(),
+  );
+  return new Response(JSON.stringify({ ok: true, started: true }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** Background driver: burst + self-chain until paused or queue empty. */
+export async function runCrawlLoopUntilPaused(env: Env, ctx: ExecutionContext): Promise<void> {
   const owner = `crawl-${crypto.randomUUID().slice(0, 8)}`;
   await emit(writeDb(env), `background crawl started (${owner})`, "info");
-
-  for (;;) {
-    const db = writeDb(env);
-    const state = await getState(db);
-    if (state.paused || state.storage_handbrake) return;
-    if (!state.pass_mode && state.continuous_paused) return;
-
-    if (!(await tryAcquireCrawlLease(db, owner, 120))) {
-      await sleep(500);
-      continue;
-    }
-
-    const result = await processOneJob(env, owner);
-    if (result === "paused") return;
-    if (result === "idle") {
-      await advancePass(db);
-      const after = await getState(db);
-      if (after.paused && !after.pass_mode) return;
-      await sleep(800);
-    }
-  }
+  await runCrawlBurst(env, ctx, { owner });
 }
