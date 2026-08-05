@@ -1,8 +1,55 @@
 import type maplibregl from "maplibre-gl";
-import { colorForType } from "../colors";
+import { ALL_TYPE_INTS, colorForType } from "../colors";
 import { iconImageExpression } from "../icons/pin-icons";
 
-const MATCH_T = ["get", "t"] as maplibregl.ExpressionSpecification;
+const TYPE_NUM = ["to-number", ["get", "t"]] as maplibregl.ExpressionSpecification;
+
+function typeColorMatch(): maplibregl.ExpressionSpecification {
+  const expr: unknown[] = ["match", TYPE_NUM];
+  for (const t of ALL_TYPE_INTS) {
+    expr.push(t, colorForType(t));
+  }
+  expr.push(colorForType(3));
+  return expr as maplibregl.ExpressionSpecification;
+}
+
+/** Circle + symbol layers for a geojson pin source. */
+export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string): void {
+  const circleId = `${sourceId}-circles`;
+  const symbolId = `${sourceId}-symbols`;
+
+  if (!map.getLayer(circleId)) {
+    map.addLayer({
+      id: circleId,
+      type: "circle",
+      source: sourceId,
+      minzoom: 0,
+      maxzoom: 11.5,
+      paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 4, 8, 6, 12, 8],
+        "circle-color": typeColorMatch(),
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#0f172a",
+        "circle-opacity": 0.95,
+      },
+    });
+  }
+
+  if (!map.getLayer(symbolId)) {
+    map.addLayer({
+      id: symbolId,
+      type: "symbol",
+      source: sourceId,
+      minzoom: 11.5,
+      layout: {
+        "icon-image": iconImageExpression(),
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 12, 0.7, 16, 1],
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
+      },
+    });
+  }
+}
 
 export function addPinLayers(
   map: maplibregl.Map,
@@ -20,11 +67,11 @@ export function addPinLayers(
       source: sourceId,
       "source-layer": sourceLayer,
       minzoom: 0,
-      maxzoom: 11,
+      maxzoom: 11.5,
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 3, 8, 5, 11, 7],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 4, 8, 6, 12, 8],
         "circle-color": typeColorMatch(),
-        "circle-stroke-width": 1.5,
+        "circle-stroke-width": 2,
         "circle-stroke-color": "#0f172a",
         "circle-opacity": 0.95,
       },
@@ -37,10 +84,10 @@ export function addPinLayers(
       type: "symbol",
       source: sourceId,
       "source-layer": sourceLayer,
-      minzoom: 11,
+      minzoom: 11.5,
       layout: {
         "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 11, 0.65, 16, 1],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 12, 0.7, 16, 1],
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
@@ -49,78 +96,49 @@ export function addPinLayers(
 }
 
 export function addDeltaPinLayers(map: maplibregl.Map, sourceId = "pins-delta"): void {
-  const circleId = `${sourceId}-circles`;
-  const symbolId = `${sourceId}-symbols`;
-
-  if (!map.getLayer(circleId)) {
-    map.addLayer({
-      id: circleId,
-      type: "circle",
-      source: sourceId,
-      minzoom: 0,
-      maxzoom: 11,
-      paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 4, 11, 8],
-        "circle-color": typeColorMatch(),
-        "circle-stroke-width": 2,
-        "circle-stroke-color": "#fff",
-        "circle-opacity": 0.95,
-      },
-    });
-  }
-
-  if (!map.getLayer(symbolId)) {
-    map.addLayer({
-      id: symbolId,
-      type: "symbol",
-      source: sourceId,
-      minzoom: 11,
-      layout: {
-        "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 11, 0.7, 16, 1],
-        "icon-allow-overlap": true,
-        "icon-ignore-placement": true,
-      },
-    });
-  }
+  addGeoJsonPinLayers(map, sourceId);
 }
 
-function typeColorMatch(): maplibregl.ExpressionSpecification {
-  return [
-    "match",
-    MATCH_T,
-    1, colorForType(1),
-    2, colorForType(2),
-    3, colorForType(3),
-    4, colorForType(4),
-    5, colorForType(5),
-    6, colorForType(6),
-    7, colorForType(7),
-    8, colorForType(8),
-    9, colorForType(9),
-    10, colorForType(10),
-    11, colorForType(11),
-    12, colorForType(12),
-    colorForType(3),
-  ];
-}
-
-export function allPinLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): string[] {
+export function baseLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): string[] {
   return [
     `${sourceId}-circles`,
     `${sourceId}-symbols`,
     `${deltaId}-circles`,
     `${deltaId}-symbols`,
-    "search-results-circles",
-    "search-results-symbols",
   ];
 }
 
+export function filteredLayerIds(filteredId = "pins-filtered"): string[] {
+  return [`${filteredId}-circles`, `${filteredId}-symbols`];
+}
+
+export function clickableLayerIds(
+  sourceId = "pins-baked",
+  deltaId = "pins-delta",
+  filteredId = "pins-filtered",
+): string[] {
+  return [...baseLayerIds(sourceId, deltaId), ...filteredLayerIds(filteredId)];
+}
+
+export function allPinLayerIds(sourceId = "pins-baked", deltaId = "pins-delta", filteredId = "pins-filtered"): string[] {
+  return clickableLayerIds(sourceId, deltaId, filteredId);
+}
+
+export function setLayerVisibility(map: maplibregl.Map, layerIds: string[], visible: boolean): void {
+  for (const id of layerIds) {
+    if (map.getLayer(id)) {
+      map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
+    }
+  }
+}
+
 export function setTypeFilter(map: maplibregl.Map, types: number[] | null, layerIds: string[]): void {
-  const filter =
-    !types || types.length === 0
-      ? null
-      : (["in", ["get", "t"], ["literal", types]] as maplibregl.FilterSpecification);
+  let filter: maplibregl.FilterSpecification | null = null;
+  if (types && types.length === 0) {
+    filter = ["==", ["literal", 1], 0];
+  } else if (types && types.length > 0) {
+    filter = ["in", TYPE_NUM, ["literal", types]];
+  }
   for (const id of layerIds) {
     if (map.getLayer(id)) map.setFilter(id, filter);
   }

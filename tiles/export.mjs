@@ -34,6 +34,7 @@ try {
 
 const TYPE_MAP = {
   C: 1, F: 2, P: 3, PN: 4, PJ: 5, OR: 6, AR: 7, AC: 8, ACC_PR: 9, PSS: 10, SF: 11, E: 12,
+  APN: 13, ACC_G: 14, ACC_P: 15, ASS: 16, DS: 17,
 };
 
 const ws = createWriteStream(outFile);

@@ -38,6 +38,8 @@ export interface SearchOptions {
   type?: string;
   attrs0?: number;
   attrs1?: number;
+  minRating?: number;
+  hasPhotos?: boolean;
   limit?: number;
   onPin?: (pin: PinFeature) => void;
   signal?: AbortSignal;

@@ -49,6 +49,10 @@ export function handleStreamingSearch(env: Env, url: URL): Response {
   const type = url.searchParams.get("type") ?? undefined;
   const attrs0 = url.searchParams.has("attrs0") ? Number(url.searchParams.get("attrs0")) : undefined;
   const attrs1 = url.searchParams.has("attrs1") ? Number(url.searchParams.get("attrs1")) : undefined;
+  const minRating = url.searchParams.has("min_rating")
+    ? Number(url.searchParams.get("min_rating"))
+    : undefined;
+  const hasPhotos = url.searchParams.get("has_photos") === "1";
   const max = Math.min(5000, Number(url.searchParams.get("limit") || 2000));
 
   const stream = new ReadableStream<Uint8Array>({
@@ -63,6 +67,8 @@ export function handleStreamingSearch(env: Env, url: URL): Response {
             type,
             attrs0,
             attrs1,
+            minRating,
+            hasPhotos: hasPhotos || undefined,
             offset,
             limit: Math.min(PAGE_SIZE, max - sent),
           });

@@ -7,6 +7,8 @@ export async function streamSearch(apiBase: string, opts: SearchOptions): Promis
   if (opts.type) params.set("type", opts.type);
   if (opts.attrs0 != null) params.set("attrs0", String(opts.attrs0));
   if (opts.attrs1 != null) params.set("attrs1", String(opts.attrs1));
+  if (opts.minRating != null && opts.minRating > 0) params.set("min_rating", String(opts.minRating));
+  if (opts.hasPhotos) params.set("has_photos", "1");
   if (opts.limit != null) params.set("limit", String(opts.limit));
 
   const resp = await fetch(`${apiBase}/api/search?${params}`, { signal: opts.signal });

@@ -51,6 +51,8 @@ export interface PlaceApi {
   ville?: string;
   note_moyenne?: string;
   nb_commentaires?: string | number;
+  nb_photos?: string | number;
+  photos?: unknown[];
   description_en?: string;
   description_fr?: string;
   description_de?: string;
@@ -82,6 +84,7 @@ export interface PlaceRow {
   review_count: number;
   attrs0: number;
   attrs1: number;
+  photo_count: number;
   name: string | null;
   city: string | null;
   country: string | null;

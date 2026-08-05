@@ -1,5 +1,7 @@
-import { P5nMap, TYPE_LABELS, colorForType, type PinFeature } from "@p5n/sdk";
+import { P5nMap, TYPE_LABELS, attrIcon, typeIconSvg, typeToInt, type PinFeature } from "@p5n/sdk";
 import maplibregl from "maplibre-gl";
+import { installDrawerSwipe } from "./drawer-swipe";
+import { initPlaceDetailPanel, loadPlaceDetail, renderPlaceDetail } from "./place-detail";
 
 const API_BASE = import.meta.env.DEV ? "" : "";
 
@@ -35,10 +37,31 @@ export function mountApp(root: HTMLElement): void {
       </button>
 
       <aside class="float float-drawer glass" id="drawer" aria-hidden="true">
+        <div class="drawer-handle" aria-hidden="true"></div>
         <header class="drawer-head">
           <h2>Filters</h2>
           <button type="button" class="btn-icon" id="btn-close-drawer" aria-label="Close">✕</button>
         </header>
+        <div class="drawer-scroll">
+        <section class="drawer-section">
+          <h3>Quality</h3>
+          <div class="filter-row">
+            <div class="field">
+              <span>Minimum rating</span>
+              <div class="star-min" id="min-rating-stars" role="group" aria-label="Minimum rating">
+                <button type="button" class="star-btn" data-min="1" aria-label="At least 1 star">★</button>
+                <button type="button" class="star-btn" data-min="2" aria-label="At least 2 stars">★</button>
+                <button type="button" class="star-btn" data-min="3" aria-label="At least 3 stars">★</button>
+                <button type="button" class="star-btn" data-min="4" aria-label="At least 4 stars">★</button>
+              </div>
+              <span class="star-hint" id="star-hint">Any rating</span>
+            </div>
+            <label class="chip" id="chip-photos">
+              <input type="checkbox" id="has-photos" />
+              <span>📷 Has photos</span>
+            </label>
+          </div>
+        </section>
         <section class="drawer-section">
           <h3>Place type</h3>
           <div class="chip-grid" id="type-filters"></div>
@@ -47,9 +70,9 @@ export function mountApp(root: HTMLElement): void {
           <h3>Facilities & features</h3>
           <div class="chip-grid" id="attr-filters"></div>
         </section>
+        </div>
         <footer class="drawer-foot">
           <button type="button" class="btn" id="btn-clear-filters">Clear all</button>
-          <button type="button" class="btn btn-accent" id="btn-apply-filters">Apply</button>
         </footer>
       </aside>
 
@@ -71,6 +94,12 @@ export function mountApp(root: HTMLElement): void {
   const btnFilters = root.querySelector("#btn-filters") as HTMLButtonElement;
   const typeFiltersEl = root.querySelector("#type-filters") as HTMLElement;
   const attrFiltersEl = root.querySelector("#attr-filters") as HTMLElement;
+  const minRatingStars = root.querySelector("#min-rating-stars") as HTMLElement;
+  const starHint = root.querySelector("#star-hint") as HTMLElement;
+  const hasPhotosEl = root.querySelector("#has-photos") as HTMLInputElement;
+  const chipPhotos = root.querySelector("#chip-photos") as HTMLElement;
+
+  let minRating = 0;
 
   const p5n = new P5nMap(mapEl, { apiBase: API_BASE, dark: true });
   p5n.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
@@ -99,14 +128,16 @@ export function mountApp(root: HTMLElement): void {
 
   p5n.onPinClick(async (placeId) => {
     detailEl.classList.add("open");
-    detailEl.innerHTML = `<header class="detail-head"><h2>Place ${placeId}</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">Loading…</p>`;
+    detailEl.innerHTML = `<header class="detail-head"><h2>Loading…</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">Fetching place…</p>`;
     detailEl.querySelector("#btn-close-detail")?.addEventListener("click", () => detailEl.classList.remove("open"));
     try {
-      const data = await p5n.placeDetail(placeId);
-      detailEl.innerHTML = `<header class="detail-head"><h2>${escapeHtml(String((data as { name?: string }).name ?? placeId))}</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+      const data = await loadPlaceDetail(API_BASE, placeId, true);
+      const typeInt = typeToInt(String(data.type || "P"));
+      detailEl.innerHTML = renderPlaceDetail(data, attributes, typeInt);
+      initPlaceDetailPanel(detailEl);
       detailEl.querySelector("#btn-close-detail")?.addEventListener("click", () => detailEl.classList.remove("open"));
     } catch (err) {
-      detailEl.innerHTML = `<header class="detail-head"><h2>Error</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><pre>${escapeHtml(String(err))}</pre>`;
+      detailEl.innerHTML = `<header class="detail-head"><h2>Error</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">${escapeHtml(String(err))}</p>`;
       detailEl.querySelector("#btn-close-detail")?.addEventListener("click", () => detailEl.classList.remove("open"));
     }
   });
@@ -124,13 +155,13 @@ export function mountApp(root: HTMLElement): void {
       const n = Number(t);
       const chip = document.createElement("label");
       chip.className = "chip active";
-      chip.innerHTML = `<input type="checkbox" checked data-t="${n}" /><span class="dot" style="background:${colorForType(n)}"></span>${label}`;
+      chip.innerHTML = `<input type="checkbox" checked data-t="${n}" /><span class="type-icon">${typeIconSvg(n, 18)}</span>${label}`;
       chip.querySelector("input")!.addEventListener("change", (e) => {
         const on = (e.target as HTMLInputElement).checked;
         chip.classList.toggle("active", on);
         if (on) selectedTypes.add(n);
         else selectedTypes.delete(n);
-        p5n.filterTypes(selectedTypes.size ? [...selectedTypes] : []);
+        applyFilters();
       });
       typeFiltersEl.appendChild(chip);
     }
@@ -141,12 +172,13 @@ export function mountApp(root: HTMLElement): void {
     for (const attr of attributes) {
       const chip = document.createElement("label");
       chip.className = "chip";
-      chip.innerHTML = `<input type="checkbox" data-key="${attr.key}" data-col="${attr.column_name}" data-bit="${attr.bit_index}" /><span>${attr.label}</span>`;
+      chip.innerHTML = `<input type="checkbox" data-key="${attr.key}" data-col="${attr.column_name}" data-bit="${attr.bit_index}" /><span class="attr-icon">${attrIcon(attr.key)}</span><span>${attr.label}</span>`;
       chip.querySelector("input")!.addEventListener("change", (e) => {
         const on = (e.target as HTMLInputElement).checked;
         chip.classList.toggle("active", on);
         if (on) selectedAttrs.add(attr.key);
         else selectedAttrs.delete(attr.key);
+        applyFilters();
       });
       attrFiltersEl.appendChild(chip);
     }
@@ -164,27 +196,55 @@ export function mountApp(root: HTMLElement): void {
     return { attrs0: attrs0 || undefined, attrs1: attrs1 || undefined };
   }
 
-  async function runSearch(): Promise<void> {
+  function filterByTypes(pins: PinFeature[]): PinFeature[] {
+    if (selectedTypes.size === 0) return [];
+    return pins.filter((p) => selectedTypes.has(Number(p.t)));
+  }
+
+  function hasAdvancedFilters(): boolean {
+    return Boolean(searchInput.value.trim()) || selectedAttrs.size > 0 || minRating > 0 || hasPhotosEl.checked;
+  }
+
+  function applyFilters(): void {
+    if (hasAdvancedFilters()) {
+      void applyAllFilters();
+      return;
+    }
+    p5n.clearFilteredPins();
+    p5n.filterTypes(selectedTypes.size ? [...selectedTypes] : []);
+    searchMeta.textContent = "";
+  }
+
+  async function applyAllFilters(): Promise<void> {
     const q = searchInput.value.trim();
     const { attrs0, attrs1 } = attrMasks();
+    const hasPhotos = hasPhotosEl.checked;
+
     const results: PinFeature[] = [];
-    p5n.clearSearchResults();
     searchMeta.textContent = "searching…";
     await p5n.search({
       q: q || undefined,
       attrs0,
       attrs1,
+      minRating: minRating || undefined,
+      hasPhotos: hasPhotos || undefined,
       limit: 500,
       onPin: (pin) => {
         results.push(pin);
-        p5n.setSearchResults(results);
-        searchMeta.textContent = `${results.length}…`;
+        const typed = filterByTypes(results);
+        p5n.showFilteredPins(typed);
+        searchMeta.textContent = `${typed.length}…`;
       },
     });
-    searchMeta.textContent = `${results.length} results`;
-    if (results.length) {
-      const lngs = results.map((p) => p.lng);
-      const lats = results.map((p) => p.lat);
+
+    const typed = filterByTypes(results);
+    p5n.showFilteredPins(typed);
+    p5n.filterTypes(selectedTypes.size ? [...selectedTypes] : []);
+    searchMeta.textContent = `${typed.length} results`;
+
+    if (typed.length) {
+      const lngs = typed.map((p) => p.lng);
+      const lats = typed.map((p) => p.lat);
       p5n.map.fitBounds(
         [
           [Math.min(...lngs), Math.min(...lats)],
@@ -195,18 +255,40 @@ export function mountApp(root: HTMLElement): void {
     }
   }
 
-  async function applyFeatureFilters(): Promise<void> {
-    if (selectedAttrs.size === 0) {
-      p5n.clearSearchResults();
-      searchMeta.textContent = "";
-      return;
-    }
-    await runSearch();
+  function updateStarUi(): void {
+    minRatingStars.querySelectorAll<HTMLButtonElement>(".star-btn").forEach((btn) => {
+      const n = Number(btn.dataset.min);
+      btn.classList.toggle("active", minRating > 0 && n <= minRating);
+    });
+    starHint.textContent = minRating > 0 ? `${minRating}+ stars minimum` : "Any rating";
   }
 
-  root.querySelector("#btn-search")!.addEventListener("click", () => void runSearch());
+  minRatingStars.querySelectorAll<HTMLButtonElement>(".star-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const n = Number(btn.dataset.min);
+      minRating = minRating === n ? 0 : n;
+      updateStarUi();
+      applyFilters();
+    });
+  });
+
+  hasPhotosEl.addEventListener("change", () => {
+    chipPhotos.classList.toggle("active", hasPhotosEl.checked);
+    applyFilters();
+  });
+
+  function closeDrawer(): void {
+    drawer.classList.remove("open");
+    btnFilters.setAttribute("aria-expanded", "false");
+    drawer.setAttribute("aria-hidden", "true");
+    drawer.style.transform = "";
+  }
+
+  installDrawerSwipe(drawer, closeDrawer);
+
+  root.querySelector("#btn-search")!.addEventListener("click", () => void applyAllFilters());
   searchInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void runSearch();
+    if (e.key === "Enter") void applyAllFilters();
   });
 
   btnFilters.addEventListener("click", () => {
@@ -214,15 +296,7 @@ export function mountApp(root: HTMLElement): void {
     btnFilters.setAttribute("aria-expanded", String(open));
     drawer.setAttribute("aria-hidden", String(!open));
   });
-  root.querySelector("#btn-close-drawer")!.addEventListener("click", () => {
-    drawer.classList.remove("open");
-    btnFilters.setAttribute("aria-expanded", "false");
-    drawer.setAttribute("aria-hidden", "true");
-  });
-  root.querySelector("#btn-apply-filters")!.addEventListener("click", () => {
-    void applyFeatureFilters();
-    drawer.classList.remove("open");
-  });
+  root.querySelector("#btn-close-drawer")!.addEventListener("click", closeDrawer);
   root.querySelector("#btn-clear-filters")!.addEventListener("click", () => {
     selectedAttrs.clear();
     attrFiltersEl.querySelectorAll<HTMLInputElement>("input").forEach((el) => {
@@ -235,10 +309,15 @@ export function mountApp(root: HTMLElement): void {
       el.checked = true;
       el.closest(".chip")?.classList.add("active");
     });
+    minRating = 0;
+    updateStarUi();
+    hasPhotosEl.checked = false;
+    chipPhotos.classList.remove("active");
+    p5n.clearFilteredPins();
     p5n.filterTypes([...selectedTypes]);
-    p5n.clearSearchResults();
     searchMeta.textContent = "";
     searchInput.value = "";
+    applyFilters();
   });
 
   async function post(path: string): Promise<Record<string, unknown>> {

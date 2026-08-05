@@ -1,4 +1,5 @@
-import { encodeAttributes, typeCode, typeToInt } from "./attributes";
+import { encodeAttributes, extractPhotoUrls, MAX_REVIEWS_PER_PLACE, photoCountFrom, typeCode, typeToInt } from "./attributes";
+import { labelForCode } from "../shared/place-types";
 import { readDb, writeDb } from "./db-session";
 import { geohashPrefixes } from "./geohash";
 import type {
@@ -125,9 +126,9 @@ export async function claimJob(db: D1Database, owner: string, leaseSeconds = 120
        WHERE status = 'pending' AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY CASE kind
          WHEN 'filter_cell' THEN 1
-         WHEN 'rescrape_place' THEN 2
-         WHEN 'place_refresh' THEN 3
-         WHEN 'place_reviews' THEN 4
+         WHEN 'place_reviews' THEN 2
+         WHEN 'rescrape_place' THEN 3
+         WHEN 'place_refresh' THEN 4
          ELSE 9
        END, created_at ASC
        LIMIT 1`,
@@ -196,41 +197,25 @@ export async function resolveJob(
 }
 
 export function pickDescription(place: PlaceApi): string {
-  return (
-    [
-      place.description_en,
-      place.description_fr,
-      place.description_de,
-      place.description_it,
-      place.description_es,
-      place.description_nl,
-    ]
-      .map((d) => String(d || "").trim())
-      .find(Boolean) || ""
-  );
+  return String(place.description_en || "").trim();
 }
 
 export function slimPlace(place: PlaceApi): Record<string, unknown> {
-  const desc = pickDescription(place);
-  const { attrs0, attrs1 } = encodeAttributes(place);
+  const photos = extractPhotoUrls(place);
+  const photoCount = photoCountFrom(place) || photos.length;
   return {
-    id: place.id,
-    latitude: place.latitude,
-    longitude: place.longitude,
-    name: place.name,
-    titre: place.titre,
-    code: place.code,
-    pays: place.pays,
-    ville: place.ville,
-    note_moyenne: place.note_moyenne,
-    nb_commentaires: place.nb_commentaires,
-    description: desc,
-    attrs0,
-    attrs1,
-    wifi: place.wifi,
-    douche: place.douche,
-    electricite: place.electricite,
-    animaux: place.animaux,
+    description: pickDescription(place),
+    route: place.route ?? null,
+    hauteur_limite: place.hauteur_limite ?? null,
+    prix_stationnement: place.prix_stationnement ?? null,
+    prix_services: place.prix_services ?? null,
+    date_fermeture: place.date_fermeture ?? null,
+    nb_places: place.nb_places ?? null,
+    site: place.site_internet ?? null,
+    tel: place.tel ?? null,
+    mail: place.mail ?? null,
+    nb_photos: photoCount,
+    photos,
   };
 }
 
@@ -246,6 +231,7 @@ function placeFromApi(place: PlaceApi): {
   country: string | null;
   attrs0: number;
   attrs1: number;
+  photoCount: number;
   description: string;
   geohash4: string;
   geohash6: string;
@@ -266,6 +252,7 @@ function placeFromApi(place: PlaceApi): {
     country: place.pays ? String(place.pays) : null,
     attrs0,
     attrs1,
+    photoCount: photoCountFrom(place),
     description: pickDescription(place),
     geohash4: g4,
     geohash6: g6,
@@ -280,20 +267,19 @@ async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: stri
     .first();
 
   const detailJson = JSON.stringify(slimPlace(place));
-  const snapshotJson = JSON.stringify({ ...slimPlace(place), raw_keys: Object.keys(place) });
 
   const stmts = [
     db
       .prepare(
         `INSERT INTO places (
           place_id, source, lat, lng, geohash4, geohash6, type, rating, review_count,
-          attrs0, attrs1, name, city, country, updated_at, reviews_fetched
-        ) VALUES (?, 'p4n', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+          attrs0, attrs1, photo_count, name, city, country, updated_at, reviews_fetched
+        ) VALUES (?, 'p4n', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(place_id) DO UPDATE SET
           lat = excluded.lat, lng = excluded.lng,
           geohash4 = excluded.geohash4, geohash6 = excluded.geohash6,
           type = excluded.type, rating = excluded.rating, review_count = excluded.review_count,
-          attrs0 = excluded.attrs0, attrs1 = excluded.attrs1,
+          attrs0 = excluded.attrs0, attrs1 = excluded.attrs1, photo_count = excluded.photo_count,
           name = excluded.name, city = excluded.city, country = excluded.country,
           updated_at = excluded.updated_at`,
       )
@@ -308,6 +294,7 @@ async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: stri
         p.reviewCount,
         p.attrs0,
         p.attrs1,
+        p.photoCount,
         p.name,
         p.city,
         p.country,
@@ -321,20 +308,14 @@ async function upsertPlaceBatch(db: D1Database, place: PlaceApi, scrapedAt: stri
       )
       .bind(p.placeId, detailJson, scrapedAt),
     db
-      .prepare("INSERT INTO snapshots (place_id, scraped_at, payload_json) VALUES (?, ?, ?)")
-      .bind(p.placeId, scrapedAt, snapshotJson),
-    db
       .prepare("INSERT INTO places_fts (place_id, name, city, description) VALUES (?, ?, ?, ?)")
       .bind(p.placeId, p.name, p.city ?? "", p.description),
   ];
 
-  // FTS5 doesn't support ON CONFLICT on virtual tables cleanly — delete+insert for updates
   if (existing) {
-    stmts[3] = db.prepare("DELETE FROM places_fts WHERE place_id = ?").bind(p.placeId);
     await db.batch([
       stmts[0],
       stmts[1],
-      stmts[2],
       db.prepare("DELETE FROM places_fts WHERE place_id = ?").bind(p.placeId),
       db
         .prepare("INSERT INTO places_fts (place_id, name, city, description) VALUES (?, ?, ?, ?)")
@@ -385,6 +366,9 @@ export async function ingestNewPlacesFromFilter(
       name: p.name,
       updated_at: scrapedAt,
     });
+    await enqueueJob(db, "place_reviews", { place_id: p.placeId }, `reviews:${p.placeId}`, {
+      requeueIfDone: true,
+    });
   }
 
   const count = await placesCount(db);
@@ -413,6 +397,12 @@ export async function refreshKnownPlace(db: D1Database, place: PlaceApi): Promis
   await upsertPlaceBatch(db, place, nowIso());
 }
 
+export function capReviewComments(comments: CommentApi[]): CommentApi[] {
+  return [...comments]
+    .sort((a, b) => String(b.date_creation || "").localeCompare(String(a.date_creation || "")))
+    .slice(0, MAX_REVIEWS_PER_PLACE);
+}
+
 export async function ingestReviews(
   db: D1Database,
   placeId: string,
@@ -422,27 +412,24 @@ export async function ingestReviews(
   comments: CommentApi[],
 ): Promise<number> {
   const scrapedAt = nowIso();
-  const stmts: D1PreparedStatement[] = [];
+  const capped = capReviewComments(comments);
 
-  for (const c of comments) {
+  await db.prepare("DELETE FROM reviews WHERE place_id = ?").bind(placeId).run();
+  await db.prepare("DELETE FROM reviews_fts WHERE place_id = ?").bind(placeId).run();
+
+  const stmts: D1PreparedStatement[] = [];
+  for (const c of capped) {
     const reviewId = String(c.id);
-    const comment = String(c.commentaire || "");
-    const payload = JSON.stringify({
-      id: c.id,
-      note: c.note,
-      commentaire: c.commentaire,
-      uuid: c.uuid,
-      date_creation: c.date_creation,
-      type_vehicule: c.type_vehicule,
-    });
+    const comment = String(c.commentaire || "").trim();
+    if (!comment) continue;
     stmts.push(
       db
         .prepare(
-          `INSERT INTO reviews (review_id, place_id, rating, author, created_at, comment, payload_json, scraped_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (review_id, place_id, rating, author, created_at, comment, scraped_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(review_id, place_id) DO UPDATE SET
              rating = excluded.rating, author = excluded.author, created_at = excluded.created_at,
-             comment = excluded.comment, payload_json = excluded.payload_json, scraped_at = excluded.scraped_at`,
+             comment = excluded.comment, scraped_at = excluded.scraped_at`,
         )
         .bind(
           reviewId,
@@ -451,11 +438,9 @@ export async function ingestReviews(
           c.uuid ?? null,
           c.date_creation ?? null,
           comment,
-          payload,
           scrapedAt,
         ),
     );
-    stmts.push(db.prepare("DELETE FROM reviews_fts WHERE review_id = ? AND place_id = ?").bind(reviewId, placeId));
     stmts.push(
       db.prepare("INSERT INTO reviews_fts (place_id, review_id, comment) VALUES (?, ?, ?)").bind(placeId, reviewId, comment),
     );
@@ -470,7 +455,7 @@ export async function ingestReviews(
     .bind(scrapedAt, placeId)
     .run();
 
-  return comments.length;
+  return capped.filter((c) => String(c.commentaire || "").trim()).length;
 }
 
 export async function reviewsFetched(db: D1Database, placeId: string): Promise<boolean> {
@@ -489,8 +474,6 @@ export async function getStats(db: D1Database) {
   const known = await placesCount(db);
   const reviewCount =
     (await db.prepare("SELECT COUNT(*) AS n FROM reviews").first<{ n: number }>())?.n ?? 0;
-  const snapshotCount =
-    (await db.prepare("SELECT COUNT(*) AS n FROM snapshots").first<{ n: number }>())?.n ?? 0;
   const tileManifest = await db.prepare("SELECT * FROM tile_manifest WHERE id = 1").first();
 
   const jobMap: Record<string, number> = {};
@@ -511,7 +494,6 @@ export async function getStats(db: D1Database) {
     jobs: jobMap,
     places: known,
     reviews: reviewCount,
-    snapshots: snapshotCount,
     tile_manifest: tileManifest,
     pass,
   };
@@ -632,49 +614,59 @@ export async function searchPlacesPage(
     attrs0?: number;
     attrs1?: number;
     type?: string;
+    minRating?: number;
+    hasPhotos?: boolean;
     offset: number;
     limit: number;
   },
 ): Promise<SearchPin[]> {
-  const { q, attrs0, attrs1, type, offset, limit } = opts;
+  const { q, attrs0, attrs1, type, minRating, hasPhotos, offset, limit } = opts;
   const binds: (string | number)[] = [];
   let sql: string;
 
+  const extraFilters = (alias: string): string => {
+    let clause = "";
+    if (type) {
+      clause += ` AND ${alias}.type = ?`;
+      binds.push(type);
+    }
+    if (attrs0 != null && attrs0 !== 0) {
+      clause += ` AND (${alias}.attrs0 & ?) = ?`;
+      binds.push(attrs0, attrs0);
+    }
+    if (attrs1 != null && attrs1 !== 0) {
+      clause += ` AND (${alias}.attrs1 & ?) = ?`;
+      binds.push(attrs1, attrs1);
+    }
+    if (minRating != null && minRating > 0) {
+      clause += ` AND ${alias}.rating >= ?`;
+      binds.push(minRating);
+    }
+    if (hasPhotos) {
+      clause += ` AND ${alias}.photo_count > 0`;
+    }
+    return clause;
+  };
+
   if (q && q.trim()) {
     const term = q.trim().replace(/"/g, '""');
-    sql = `SELECT p.place_id, p.lat, p.lng, p.type, p.name, p.rating, p.review_count,
-                  bm25(places_fts) AS score
-           FROM places_fts
-           JOIN places p ON p.place_id = places_fts.place_id
-           WHERE places_fts MATCH ?`;
-    binds.push(`"${term}"* OR ${term}*`);
-    if (type) {
-      sql += " AND p.type = ?";
-      binds.push(type);
-    }
-    if (attrs0 != null && attrs0 !== 0) {
-      sql += " AND (p.attrs0 & ?) = ?";
-      binds.push(attrs0, attrs0);
-    }
-    if (attrs1 != null && attrs1 !== 0) {
-      sql += " AND (p.attrs1 & ?) = ?";
-      binds.push(attrs1, attrs1);
-    }
-    sql += " ORDER BY score ASC, p.rating DESC NULLS LAST LIMIT ? OFFSET ?";
+    const match = `"${term}"* OR ${term}*`;
+    sql = `SELECT p.place_id, p.lat, p.lng, p.type, p.name, p.rating, p.review_count, hits.score
+           FROM (
+             SELECT place_id, MIN(score) AS score FROM (
+               SELECT place_id, bm25(places_fts) AS score FROM places_fts WHERE places_fts MATCH ?
+               UNION ALL
+               SELECT place_id, bm25(reviews_fts) AS score FROM reviews_fts WHERE reviews_fts MATCH ?
+             ) GROUP BY place_id
+           ) hits
+           JOIN places p ON p.place_id = hits.place_id
+           WHERE 1=1`;
+    binds.push(match, match);
+    sql += extraFilters("p");
+    sql += " ORDER BY hits.score ASC, p.rating DESC NULLS LAST LIMIT ? OFFSET ?";
   } else {
     sql = `SELECT place_id, lat, lng, type, name, rating, review_count, 0 AS score FROM places WHERE 1=1`;
-    if (type) {
-      sql += " AND type = ?";
-      binds.push(type);
-    }
-    if (attrs0 != null && attrs0 !== 0) {
-      sql += " AND (attrs0 & ?) = ?";
-      binds.push(attrs0, attrs0);
-    }
-    if (attrs1 != null && attrs1 !== 0) {
-      sql += " AND (attrs1 & ?) = ?";
-      binds.push(attrs1, attrs1);
-    }
+    sql += extraFilters("places");
     sql += " ORDER BY rating DESC NULLS LAST LIMIT ? OFFSET ?";
   }
   binds.push(limit, offset);
@@ -706,7 +698,7 @@ export async function eventsSince(db: D1Database, afterId: number, limit = 50) {
   return res.results ?? [];
 }
 
-export async function getPlaceFull(env: Env, placeId: string) {
+export async function getPlaceFull(env: Env, placeId: string, opts: { includeReviews?: boolean } = {}) {
   const row = await readDb(env)
     .prepare(
       `SELECT p.*, d.payload_json AS detail_json
@@ -718,36 +710,44 @@ export async function getPlaceFull(env: Env, placeId: string) {
     .first<PlaceRow & { detail_json: string | null }>();
   if (!row) return null;
 
-  const reviews = await readDb(env)
-    .prepare(
-      `SELECT review_id, place_id, rating, author, created_at, comment, payload_json, scraped_at
-       FROM reviews WHERE place_id = ? ORDER BY created_at DESC LIMIT 200`,
-    )
-    .bind(placeId)
-    .all();
-
-  let detail: unknown = null;
+  let detail: Record<string, unknown> | null = null;
   if (row.detail_json) {
     try {
-      detail = JSON.parse(row.detail_json);
+      detail = JSON.parse(row.detail_json) as Record<string, unknown>;
     } catch {
-      detail = row.detail_json;
+      detail = null;
     }
   }
 
-  return {
-    ...row,
+  const base = {
+    place_id: row.place_id,
+    lat: row.lat,
+    lng: row.lng,
+    type: row.type,
+    type_label: labelForCode(row.type),
+    rating: row.rating,
+    review_count: row.review_count,
+    photo_count: row.photo_count ?? 0,
+    attrs0: row.attrs0,
+    attrs1: row.attrs1,
+    name: row.name,
+    city: row.city,
+    country: row.country,
+    updated_at: row.updated_at,
     detail,
-    reviews: (reviews.results ?? []).map((r) => {
-      const rr = { ...r } as Record<string, unknown>;
-      try {
-        rr.payload_json = JSON.parse(String(r.payload_json));
-      } catch {
-        /* keep */
-      }
-      return rr;
-    }),
   };
+
+  if (!opts.includeReviews) return base;
+
+  const reviews = await readDb(env)
+    .prepare(
+      `SELECT review_id, rating, author, created_at, comment
+       FROM reviews WHERE place_id = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .bind(placeId, MAX_REVIEWS_PER_PLACE)
+    .all();
+
+  return { ...base, reviews: reviews.results ?? [] };
 }
 
 export async function recentEvents(db: D1Database, limit = 40) {

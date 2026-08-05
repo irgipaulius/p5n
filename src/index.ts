@@ -112,7 +112,8 @@ export default {
             );
           }
         }
-        const row = await getPlaceFull(env, placeId);
+        const includeReviews = url.searchParams.get("reviews") === "1";
+        const row = await getPlaceFull(env, placeId, { includeReviews });
         if (!row) return json({ error: "not found" }, 404);
         return json(row, 200, { "cache-control": "public, max-age=60" });
       }

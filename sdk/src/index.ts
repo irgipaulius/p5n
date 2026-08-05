@@ -2,8 +2,8 @@ import type maplibregl from "maplibre-gl";
 import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
-import { addDeltaPinLayers, addPinLayers, allPinLayerIds, setTypeFilter } from "./layers/pins";
-import { registerPinIcons, iconImageExpression } from "./icons/pin-icons";
+import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, filteredLayerIds, setLayerVisibility, setTypeFilter } from "./layers/pins";
+import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
   addPinsVectorSource,
@@ -43,7 +43,11 @@ export class P5nMap {
     });
   }
 
-  private searchFeatures: GeoJSON.Feature[] = [];
+  private filteredSourceId = "pins-filtered";
+  private filterMode = false;
+  private activeTypeFilter: number[] | null = null;
+
+  private filteredFeatures: GeoJSON.Feature[] = [];
 
   private async attachSources(): Promise<void> {
     await registerPinIcons(this.map);
@@ -68,42 +72,30 @@ export class P5nMap {
     await registerPinIcons(this.map);
     addDeltaGeoJsonSource(this.map, this.deltaSourceId);
     addDeltaPinLayers(this.map, this.deltaSourceId);
-    this.ensureSearchLayer();
+    this.ensureFilteredLayer();
     this.flushDeltaPins();
-    this.flushSearchResults();
+    this.flushFilteredPins();
+    this.applyVisibilityState();
   }
 
-  private ensureSearchLayer(): void {
-    if (!this.map.getSource("search-results")) {
-      this.map.addSource("search-results", {
+  private ensureFilteredLayer(): void {
+    if (!this.map.getSource(this.filteredSourceId)) {
+      this.map.addSource(this.filteredSourceId, {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
         promoteId: "id",
       });
-      this.map.addLayer({
-        id: "search-results-circles",
-        type: "circle",
-        source: "search-results",
-        minzoom: 0,
-        maxzoom: 11,
-        paint: {
-          "circle-radius": 8,
-          "circle-color": "#f472b6",
-          "circle-stroke-width": 2,
-          "circle-stroke-color": "#fff",
-        },
-      });
-      this.map.addLayer({
-        id: "search-results-symbols",
-        type: "symbol",
-        source: "search-results",
-        minzoom: 11,
-        layout: {
-          "icon-image": iconImageExpression(),
-          "icon-size": 0.9,
-          "icon-allow-overlap": true,
-        },
-      });
+      addGeoJsonPinLayers(this.map, this.filteredSourceId);
+    }
+  }
+
+  private applyVisibilityState(): void {
+    setLayerVisibility(this.map, baseLayerIds(this.pinsSourceId, this.deltaSourceId), !this.filterMode);
+    setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
+    if (this.activeTypeFilter && !this.filterMode) {
+      this.filterTypes(this.activeTypeFilter);
+    } else if (this.activeTypeFilter && this.filterMode) {
+      setTypeFilter(this.map, this.activeTypeFilter, filteredLayerIds(this.filteredSourceId));
     }
   }
 
@@ -213,37 +205,59 @@ export class P5nMap {
   }
 
   filterTypes(types: number[] | null): void {
-    setTypeFilter(this.map, types, allPinLayerIds(this.pinsSourceId, this.deltaSourceId));
+    this.activeTypeFilter = types;
+    const layers = this.filterMode
+      ? filteredLayerIds(this.filteredSourceId)
+      : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
+    setTypeFilter(this.map, types, layers);
   }
 
-  setSearchResults(pins: PinFeature[]): void {
-    this.searchFeatures = pins.map((pin) => ({
-      type: "Feature" as const,
+  isFilterMode(): boolean {
+    return this.filterMode;
+  }
+
+  private pinFeature(pin: PinFeature): GeoJSON.Feature {
+    const t = Number(pin.t) || 3;
+    return {
+      type: "Feature",
       id: pin.id,
-      geometry: { type: "Point" as const, coordinates: [pin.lng, pin.lat] },
-      properties: { id: pin.id, t: pin.t, name: pin.name ?? "" },
-    }));
-    this.flushSearchResults();
+      geometry: { type: "Point", coordinates: [pin.lng, pin.lat] },
+      properties: { id: pin.id, t, name: pin.name ?? "" },
+    };
   }
 
-  clearSearchResults(): void {
-    this.searchFeatures = [];
-    this.flushSearchResults();
-  }
-
-  private flushSearchResults(): void {
-    const src = this.map.getSource("search-results") as maplibregl.GeoJSONSource | undefined;
+  private flushFilteredPins(): void {
+    const src = this.map.getSource(this.filteredSourceId) as maplibregl.GeoJSONSource | undefined;
     if (!src) return;
-    src.setData({ type: "FeatureCollection", features: [...this.searchFeatures] });
+    src.setData({ type: "FeatureCollection", features: [...this.filteredFeatures] });
   }
 
-  onPinClick(handler: (placeId: string, feature: maplibregl.MapGeoJSONFeature) => void): void {
-    for (const layerId of allPinLayerIds(this.pinsSourceId, this.deltaSourceId)) {
+  /** Show only matching pins (search / feature filter). Hides the full set. */
+  showFilteredPins(pins: PinFeature[]): void {
+    this.filterMode = true;
+    this.filteredFeatures = pins.map((p) => this.pinFeature(p));
+    this.flushFilteredPins();
+    this.applyVisibilityState();
+    if (this.activeTypeFilter) {
+      setTypeFilter(this.map, this.activeTypeFilter, filteredLayerIds(this.filteredSourceId));
+    }
+  }
+
+  clearFilteredPins(): void {
+    this.filterMode = false;
+    this.filteredFeatures = [];
+    this.flushFilteredPins();
+    this.applyVisibilityState();
+  }
+
+  onPinClick(handler: (placeId: string) => void): void {
+    const layers = clickableLayerIds(this.pinsSourceId, this.deltaSourceId, this.filteredSourceId);
+    for (const layerId of layers) {
       this.map.on("click", layerId, (e) => {
         const f = e.features?.[0];
         if (!f) return;
         const id = String(f.properties?.id ?? f.id ?? "");
-        if (id) handler(id, f);
+        if (id) handler(id);
       });
       this.map.on("mouseenter", layerId, () => {
         this.map.getCanvas().style.cursor = "pointer";
@@ -256,5 +270,6 @@ export class P5nMap {
 }
 
 export * from "./colors";
+export { typeIconSvg, attrIcon, ATTR_ICONS } from "./icons/pin-icons";
 export * from "./types";
 export { streamSearch, fetchPlaceDetail, downloadPinsPmtiles, hasOfflineTiles };

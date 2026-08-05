@@ -18,17 +18,4 @@ export function buildEuropeGrid(step = 1): Cell[] {
   return cells;
 }
 
-export const PLACE_TYPE_LABELS: Record<string, string> = {
-  C: "Camping",
-  F: "Farm / private",
-  P: "Parking",
-  PN: "Nature / wild",
-  PJ: "Parking day",
-  OR: "Homestay / other",
-  AR: "Aire",
-  AC: "Aire camping-car",
-  ACC_PR: "Private aire",
-  PSS: "Service area",
-  SF: "Sports / field",
-  E: "Establishment",
-};
+export { TYPE_CODE_LABELS as PLACE_TYPE_LABELS } from "../shared/place-types";

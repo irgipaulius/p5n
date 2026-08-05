@@ -4,7 +4,7 @@ compatibility_date = "2025-08-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-MAX_PLACES = "50"
+MAX_PLACES = "10"
 REQUEST_DELAY_MS = "100"
 DEFAULT_LAT = "41.688908"
 DEFAULT_LNG = "19.641004"
