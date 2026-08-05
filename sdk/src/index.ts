@@ -2,7 +2,8 @@ import type maplibregl from "maplibre-gl";
 import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
-import { addDeltaPinLayers, addPinLayers } from "./layers/pins";
+import { addDeltaPinLayers, addPinLayers, allPinLayerIds, setTypeFilter } from "./layers/pins";
+import { registerPinIcons, iconImageExpression } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
   addPinsVectorSource,
@@ -37,7 +38,10 @@ export class P5nMap {
     });
   }
 
+  private searchFeatures: GeoJSON.Feature[] = [];
+
   private async attachSources(): Promise<void> {
+    await registerPinIcons(this.map);
     const url = pinsPmtilesUrl(this.config);
     if (url) {
       addPinsVectorSource(this.map, this.pinsSourceId, url);
@@ -56,9 +60,33 @@ export class P5nMap {
 
   private ensureDeltaLayer(): void {
     if (!this.map.isStyleLoaded()) return;
-    addDeltaGeoJsonSource(this.map, this.deltaSourceId);
-    addDeltaPinLayers(this.map, this.deltaSourceId);
-    this.flushDeltaPins();
+    void registerPinIcons(this.map).then(() => {
+      addDeltaGeoJsonSource(this.map, this.deltaSourceId);
+      addDeltaPinLayers(this.map, this.deltaSourceId);
+      this.ensureSearchLayer();
+      this.flushDeltaPins();
+      this.flushSearchResults();
+    });
+  }
+
+  private ensureSearchLayer(): void {
+    if (!this.map.getSource("search-results")) {
+      this.map.addSource("search-results", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+        promoteId: "id",
+      });
+      this.map.addLayer({
+        id: "search-results-symbols",
+        type: "symbol",
+        source: "search-results",
+        layout: {
+          "icon-image": iconImageExpression(),
+          "icon-size": 1,
+          "icon-allow-overlap": true,
+        },
+      });
+    }
   }
 
   private flushDeltaPins(): void {
@@ -160,8 +188,33 @@ export class P5nMap {
     await saveOfflineManifest(manifest);
   }
 
+  filterTypes(types: number[] | null): void {
+    setTypeFilter(this.map, types, allPinLayerIds(this.pinsSourceId, this.deltaSourceId));
+  }
+
+  setSearchResults(pins: PinFeature[]): void {
+    this.searchFeatures = pins.map((pin) => ({
+      type: "Feature" as const,
+      id: pin.id,
+      geometry: { type: "Point" as const, coordinates: [pin.lng, pin.lat] },
+      properties: { id: pin.id, t: pin.t, name: pin.name ?? "" },
+    }));
+    this.flushSearchResults();
+  }
+
+  clearSearchResults(): void {
+    this.searchFeatures = [];
+    this.flushSearchResults();
+  }
+
+  private flushSearchResults(): void {
+    const src = this.map.getSource("search-results") as maplibregl.GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData({ type: "FeatureCollection", features: [...this.searchFeatures] });
+  }
+
   onPinClick(handler: (placeId: string, feature: maplibregl.MapGeoJSONFeature) => void): void {
-    for (const layerId of [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`, `${this.deltaSourceId}-circles`]) {
+    for (const layerId of allPinLayerIds(this.pinsSourceId, this.deltaSourceId)) {
       this.map.on("click", layerId, (e) => {
         const f = e.features?.[0];
         if (!f) return;
