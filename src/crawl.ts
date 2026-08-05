@@ -30,6 +30,9 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
   const payload = JSON.parse(job.payload_json) as Record<string, unknown>;
 
   if (job.kind === "filter_cell") {
+    const state = await getState(db);
+    if (state.paused) throw new Error("scraper paused");
+
     const lat = Number(payload.lat);
     const lng = Number(payload.lng);
     const cellId = payload.cell_id ? String(payload.cell_id) : null;
@@ -38,7 +41,7 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
     const url = filterUrl(lat, lng);
 
     try {
-      const { status, body, data } = await fetchJson(url);
+      const { status, body, data } = await fetchJson(env, url);
       if (status >= 500) throw new Error(`filter HTTP ${status}`);
       const parsed = data as { status?: string; lieux?: PlaceApi[] };
       if (parsed.status !== "OK") throw new Error(`filter not OK: ${body.slice(0, 200)}`);
@@ -90,9 +93,12 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
   }
 
   if (job.kind === "place_reviews" || job.kind === "rescrape_place") {
+    const state = await getState(db);
+    if (state.paused) throw new Error("scraper paused");
+
     const placeId = String(payload.place_id);
     const url = commentsUrl(placeId);
-    const { status, body, data } = await fetchJson(url);
+    const { status, body, data } = await fetchJson(env, url);
     if (status >= 500) throw new Error(`commGet HTTP ${status}`);
     const parsed = data as { status?: string; commentaires?: CommentApi[] };
     if (parsed.status !== "OK") throw new Error(`commGet not OK: ${body.slice(0, 200)}`);

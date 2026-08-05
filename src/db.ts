@@ -1,4 +1,4 @@
-import { encodeAttributes, typeCode } from "./attributes";
+import { encodeAttributes, typeCode, typeToInt } from "./attributes";
 import { readDb, writeDb } from "./db-session";
 import { geohashPrefixes } from "./geohash";
 import type {
@@ -375,6 +375,16 @@ export async function ingestNewPlacesFromFilter(
 
   for (const place of fresh) {
     await upsertPlaceBatch(db, place, scrapedAt);
+    const p = placeFromApi(place);
+    await emitPin(db, {
+      id: p.placeId,
+      lat: p.lat,
+      lng: p.lng,
+      t: typeToInt(p.type),
+      type: p.type,
+      name: p.name,
+      updated_at: scrapedAt,
+    });
   }
 
   const count = await placesCount(db);
@@ -518,7 +528,9 @@ export async function listPlaces(db: D1Database, limit = 50) {
   return res.results ?? [];
 }
 
-import { typeToInt } from "./attributes";
+export async function emitPin(db: D1Database, pin: PinGeo): Promise<void> {
+  await emit(db, pin.name || pin.id, "pin", { pin });
+}
 
 function rowToPin(row: PlaceRow): PinGeo {
   return {
@@ -920,7 +932,19 @@ export function commentsUrl(placeId: string): string {
   return `${GUEST}/commGet.php?${qs}`;
 }
 
-export async function fetchJson(url: string): Promise<{ status: number; body: string; data: unknown }> {
+let lastOutboundFetchAt = 0;
+
+function rateLimitMs(env: Env): number {
+  return Math.max(100, Number(env.REQUEST_DELAY_MS || 100));
+}
+
+export async function fetchJson(env: Env, url: string): Promise<{ status: number; body: string; data: unknown }> {
+  const minGap = rateLimitMs(env);
+  const now = Date.now();
+  const wait = minGap - (now - lastOutboundFetchAt);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastOutboundFetchAt = Date.now();
+
   const resp = await fetch(url, {
     headers: {
       "User-Agent": "p5n/0.1 (cloudflare-workers; +https://github.com/irgipaulius/p5n)",

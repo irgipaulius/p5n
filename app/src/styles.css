@@ -129,7 +129,13 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   background: #1e293b;
 }
 
-.progress {
-  font-size: 11px;
+.topbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.status {
+  font-size: 12px;
   color: var(--accent);
+  min-width: 120px;
 }

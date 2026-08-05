@@ -1,4 +1,4 @@
-import { P5nMap, TYPE_LABELS, colorForType, type PinFeature } from "@p5n/sdk";
+import { P5nMap, colorForType, type PinFeature } from "@p5n/sdk";
 import maplibregl from "maplibre-gl";
 
 const API_BASE = import.meta.env.DEV ? "" : "";
@@ -7,15 +7,10 @@ export function mountApp(root: HTMLElement): void {
   root.innerHTML = `
     <div class="layout">
       <header class="topbar">
-        <input type="search" id="search" placeholder="Search places, features…" autocomplete="off" />
-        <button type="button" id="btn-search" class="primary">Search</button>
-        <button type="button" id="btn-crawl">+10 local</button>
-        <button type="button" id="btn-new">Fetch new</button>
-        <button type="button" id="btn-full">Full pass</button>
-        <button type="button" id="btn-cont">Resume crawl</button>
-        <button type="button" id="btn-offline">Offline</button>
+        <button type="button" id="btn-start" class="primary">Start scrape</button>
+        <button type="button" id="btn-toggle">Pause scrape</button>
         <div class="stats" id="stats">loading…</div>
-        <span class="progress" id="progress"></span>
+        <span class="status" id="status"></span>
       </header>
       <div class="main">
         <div id="map"></div>
@@ -29,20 +24,26 @@ export function mountApp(root: HTMLElement): void {
   const statsEl = root.querySelector("#stats") as HTMLElement;
   const logEl = root.querySelector("#log") as HTMLElement;
   const detailEl = root.querySelector("#detail") as HTMLElement;
-  const progressEl = root.querySelector("#progress") as HTMLElement;
-  const searchInput = root.querySelector("#search") as HTMLInputElement;
+  const statusEl = root.querySelector("#status") as HTMLElement;
+  const btnStart = root.querySelector("#btn-start") as HTMLButtonElement;
+  const btnToggle = root.querySelector("#btn-toggle") as HTMLButtonElement;
 
   const p5n = new P5nMap(mapEl, { apiBase: API_BASE, dark: true });
   p5n.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-left");
   p5n.map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: true }), "top-left");
   p5n.map.addControl(new maplibregl.ScaleControl(), "bottom-left");
 
+  let pinCount = 0;
+  let scraping = false;
+
   void (async () => {
     await p5n.tryOfflineFirst();
     await p5n.initTilesFromManifest();
     p5n.watchSystemTheme();
-    p5n.onMoveEndEnrich();
-    p5n.connectLiveStream(applyStats);
+    const n = await p5n.loadExistingPins();
+    pinCount = n;
+    statusEl.textContent = n ? `${n} pins loaded` : "ready";
+    await refreshStats();
   })();
 
   p5n.onPinClick(async (placeId) => {
@@ -56,80 +57,15 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
-  let searchSource: maplibregl.GeoJSONSource | null = null;
-  function ensureSearchLayer(): void {
-    if (!p5n.map.getSource("search-results")) {
-      p5n.map.addSource("search-results", {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
-      p5n.map.addLayer({
-        id: "search-results-circles",
-        type: "circle",
-        source: "search-results",
-        paint: {
-          "circle-radius": 9,
-          "circle-color": "#f472b6",
-          "circle-stroke-width": 2,
-          "circle-stroke-color": "#fff",
-        },
-      });
-    }
-    searchSource = p5n.map.getSource("search-results") as maplibregl.GeoJSONSource;
+  async function post(path: string): Promise<Record<string, unknown>> {
+    const resp = await fetch(`${API_BASE}${path}`, { method: "POST" });
+    return resp.json();
   }
 
-  async function runSearch(): Promise<void> {
-    const q = searchInput.value.trim();
-    ensureSearchLayer();
-    const features: GeoJSON.Feature[] = [];
-    searchSource?.setData({ type: "FeatureCollection", features });
-    progressEl.textContent = "searching…";
-    await p5n.search({
-      q: q || undefined,
-      limit: 500,
-      onPin: (pin: PinFeature) => {
-        features.push({
-          type: "Feature",
-          geometry: { type: "Point", coordinates: [pin.lng, pin.lat] },
-          properties: { id: pin.id, name: pin.name, t: pin.t },
-        });
-        searchSource?.setData({ type: "FeatureCollection", features: [...features] });
-        progressEl.textContent = `${features.length} results…`;
-      },
-    });
-    progressEl.textContent = `${features.length} results`;
-    if (features.length) {
-      const coords = features.map((f) => (f.geometry as GeoJSON.Point).coordinates as [number, number]);
-      const bounds = coords.reduce(
-        (b, c) => b.extend(c),
-        new maplibregl.LngLatBounds(coords[0], coords[0]),
-      );
-      p5n.map.fitBounds(bounds, { padding: 48, maxZoom: 12 });
-    }
-  }
-
-  root.querySelector("#btn-search")!.addEventListener("click", () => void runSearch());
-  searchInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void runSearch();
-  });
-
-  root.querySelector("#btn-crawl")!.addEventListener("click", () => post("/api/crawl"));
-  root.querySelector("#btn-new")!.addEventListener("click", () => post("/api/crawl/new"));
-  root.querySelector("#btn-full")!.addEventListener("click", () => post("/api/crawl/full"));
-  root.querySelector("#btn-cont")!.addEventListener("click", () => post("/api/control/continuous/resume"));
-  root.querySelector("#btn-offline")!.addEventListener("click", () => {
-    progressEl.textContent = "downloading…";
-    void p5n.downloadOffline((pct) => {
-      progressEl.textContent = `offline ${pct}%`;
-    }).then(() => {
-      progressEl.textContent = "offline ready";
-    }).catch((err) => {
-      progressEl.textContent = String(err);
-    });
-  });
-
-  async function post(path: string): Promise<void> {
-    await fetch(`${API_BASE}${path}`, { method: "POST" });
+  async function refreshStats(): Promise<void> {
+    const resp = await fetch(`${API_BASE}/api/stats`);
+    const s = await resp.json();
+    applyStats(s);
   }
 
   function applyStats(stats: unknown): void {
@@ -137,59 +73,63 @@ export function mountApp(root: HTMLElement): void {
       places?: number;
       reviews?: number;
       jobs?: Record<string, number>;
-      pass?: { pass_id: number; mode: string; done: number; total: number; continuous_paused: boolean };
       state?: { paused: number; max_places: number };
     };
+    scraping = !s.state?.paused;
     const queue = s.jobs?.pending ?? 0;
     statsEl.innerHTML = `
       <span>places <b>${s.places ?? 0}</b></span>
-      <span>reviews <b>${s.reviews ?? 0}</b></span>
       <span>queue <b>${queue}</b></span>
       <span>cap <b>${s.state?.max_places ?? "?"}</b></span>
-      ${s.pass?.pass_id ? `<span>pass #${s.pass.pass_id} ${s.pass.done}/${s.pass.total}</span>` : ""}
     `;
+    btnToggle.textContent = scraping ? "Pause scrape" : "Resume scrape";
+    btnToggle.classList.toggle("primary", !scraping);
+    btnStart.disabled = scraping;
   }
 
-  void fetch(`${API_BASE}/api/stats`)
-    .then((r) => r.json())
-    .then(applyStats);
+  btnStart.addEventListener("click", () => {
+    btnStart.disabled = true;
+    statusEl.textContent = "starting…";
+    void post("/api/scrape/start")
+      .then(() => refreshStats())
+      .then(() => {
+        statusEl.textContent = "scraping…";
+      })
+      .catch((err) => {
+        statusEl.textContent = String(err);
+        btnStart.disabled = false;
+      });
+  });
+
+  btnToggle.addEventListener("click", () => {
+    statusEl.textContent = scraping ? "pausing…" : "resuming…";
+    void post("/api/scrape/toggle")
+      .then(() => refreshStats())
+      .then(() => {
+        statusEl.textContent = scraping ? "scraping…" : "paused";
+        if (!scraping) btnStart.disabled = false;
+      })
+      .catch((err) => {
+        statusEl.textContent = String(err);
+      });
+  });
 
   const es = new EventSource(`${API_BASE}/api/stream`);
   es.addEventListener("log", (ev) => {
-    const e = JSON.parse((ev as MessageEvent).data) as { message: string; created_at: string };
+    const e = JSON.parse((ev as MessageEvent).data) as { message: string; created_at: string; level?: string };
+    if (e.level === "pin") return;
     const line = document.createElement("div");
     line.textContent = `${e.created_at.slice(11, 19)} ${e.message}`;
     logEl.prepend(line);
-    while (logEl.childElementCount > 40) logEl.lastElementChild?.remove();
+    while (logEl.childElementCount > 30) logEl.lastElementChild?.remove();
   });
   es.addEventListener("place", (ev) => {
-    const pin = JSON.parse((ev as MessageEvent).data);
+    const pin = JSON.parse((ev as MessageEvent).data) as PinFeature;
     p5n.addLivePin(pin);
+    statusEl.textContent = `live · ${pin.name ?? pin.id}`;
   });
   es.addEventListener("stats", (ev) => applyStats(JSON.parse((ev as MessageEvent).data)));
-
-  // Type filter chips
-  const filterWrap = document.createElement("div");
-  filterWrap.className = "type-filters";
-  for (const [t, label] of Object.entries(TYPE_LABELS)) {
-    const n = Number(t);
-    const labelEl = document.createElement("label");
-    labelEl.innerHTML = `<input type="checkbox" checked data-t="${n}" /><span style="color:${colorForType(n)}">●</span> ${label}`;
-    filterWrap.appendChild(labelEl);
-  }
-  root.querySelector(".topbar")!.appendChild(filterWrap);
-
-  filterWrap.addEventListener("change", () => {
-    const checked = [...filterWrap.querySelectorAll<HTMLInputElement>("input:checked")].map((el) =>
-      Number(el.dataset.t),
-    );
-    for (const suffix of ["-circles", "-symbols"]) {
-      const layerId = `pins-baked${suffix}`;
-      if (p5n.map.getLayer(layerId)) {
-        p5n.map.setFilter(layerId, ["in", ["get", "t"], ["literal", checked]]);
-      }
-    }
-  });
+  es.addEventListener("hello", () => refreshStats());
 }
 
 function escapeHtml(s: string): string {

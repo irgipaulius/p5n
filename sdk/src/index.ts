@@ -1,5 +1,5 @@
 import type maplibregl from "maplibre-gl";
-import type { P5nConfig } from "../types";
+import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { addDeltaPinLayers, addPinLayers } from "./layers/pins";
@@ -10,7 +10,6 @@ import {
   fetchTileManifest,
   pinsPmtilesUrl,
   registerPmtilesProtocol,
-  upsertDeltaPin,
 } from "./map-core";
 import { downloadPinsPmtiles, getOfflineTilesUrl, hasOfflineTiles, saveOfflineManifest } from "./offline/opfs";
 import { streamSearch } from "./search/streaming-search";
@@ -20,6 +19,8 @@ export class P5nMap {
   readonly map: maplibregl.Map;
   readonly config: P5nConfig;
   private pinsSourceId = "pins-baked";
+  private deltaSourceId = "pins-delta";
+  private deltaFeatures: GeoJSON.Feature[] = [];
   private styleReady = false;
   private layerAttach?: () => void;
   dark: boolean;
@@ -32,6 +33,7 @@ export class P5nMap {
     this.map.on("load", () => {
       this.styleReady = true;
       void this.attachSources();
+      this.flushDeltaPins();
     });
   }
 
@@ -41,18 +43,45 @@ export class P5nMap {
       addPinsVectorSource(this.map, this.pinsSourceId, url);
       addPinLayers(this.map, this.pinsSourceId);
     }
-    addDeltaGeoJsonSource(this.map);
-    addDeltaPinLayers(this.map);
+    this.ensureDeltaLayer();
     this.layerAttach = () => {
-      if (url) {
-        if (!this.map.getSource(this.pinsSourceId)) {
-          addPinsVectorSource(this.map, this.pinsSourceId, url);
-          addPinLayers(this.map, this.pinsSourceId);
-        }
+      if (url && !this.map.getSource(this.pinsSourceId)) {
+        addPinsVectorSource(this.map, this.pinsSourceId, url);
+        addPinLayers(this.map, this.pinsSourceId);
       }
-      addDeltaGeoJsonSource(this.map);
-      addDeltaPinLayers(this.map);
+      this.ensureDeltaLayer();
+      this.flushDeltaPins();
     };
+  }
+
+  private ensureDeltaLayer(): void {
+    if (!this.map.isStyleLoaded()) return;
+    addDeltaGeoJsonSource(this.map, this.deltaSourceId);
+    addDeltaPinLayers(this.map, this.deltaSourceId);
+    this.flushDeltaPins();
+  }
+
+  private flushDeltaPins(): void {
+    const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData({ type: "FeatureCollection", features: [...this.deltaFeatures] });
+  }
+
+  async loadExistingPins(): Promise<number> {
+    const resp = await fetch(`${this.config.apiBase}/api/places/geo`);
+    if (!resp.ok) return 0;
+    const pins = (await resp.json()) as PinFeature[];
+    for (const pin of pins) this.addLivePin(pin);
+    if (pins.length > 0) {
+      const lngs = pins.map((p) => p.lng);
+      const lats = pins.map((p) => p.lat);
+      const bounds: maplibregl.LngLatBoundsLike = [
+        [Math.min(...lngs), Math.min(...lats)],
+        [Math.max(...lngs), Math.max(...lats)],
+      ];
+      this.map.fitBounds(bounds, { padding: 60, maxZoom: 10, duration: 0 });
+    }
+    return pins.length;
   }
 
   async initTilesFromManifest(): Promise<void> {
@@ -93,14 +122,24 @@ export class P5nMap {
   }
 
   addLivePin(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): void {
-    upsertDeltaPin(this.map, pin);
+    const idx = this.deltaFeatures.findIndex((f) => String(f.properties?.id) === pin.id);
+    const feature: GeoJSON.Feature = {
+      type: "Feature",
+      id: pin.id,
+      geometry: { type: "Point", coordinates: [pin.lng, pin.lat] },
+      properties: { id: pin.id, t: pin.t, name: pin.name ?? "" },
+    };
+    if (idx >= 0) this.deltaFeatures[idx] = feature;
+    else this.deltaFeatures.push(feature);
+    this.flushDeltaPins();
   }
 
-  connectLiveStream(onStats?: (stats: unknown) => void): EventSource {
+  connectLiveStream(onStats?: (stats: unknown) => void, onPin?: (pin: PinFeature) => void): EventSource {
     const es = new EventSource(`${this.config.apiBase}/api/stream`);
     es.addEventListener("place", (ev) => {
-      const pin = JSON.parse((ev as MessageEvent).data);
+      const pin = JSON.parse((ev as MessageEvent).data) as PinFeature;
       this.addLivePin(pin);
+      onPin?.(pin);
     });
     es.addEventListener("stats", (ev) => onStats?.(JSON.parse((ev as MessageEvent).data)));
     return es;
@@ -122,7 +161,7 @@ export class P5nMap {
   }
 
   onPinClick(handler: (placeId: string, feature: maplibregl.MapGeoJSONFeature) => void): void {
-    for (const layerId of [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`, "pins-delta-circles"]) {
+    for (const layerId of [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`, `${this.deltaSourceId}-circles`]) {
       this.map.on("click", layerId, (e) => {
         const f = e.features?.[0];
         if (!f) return;

@@ -34,6 +34,7 @@ import {
   handleTileManifest,
 } from "./geo-api";
 import { buildEuropeGrid } from "./placeTypes";
+import { pauseScrape, resumeScrape, seedFilterJob, startScrape } from "./scrape";
 import type { CommentApi, Env } from "./types";
 
 export default {
@@ -97,7 +98,7 @@ export default {
         if (!(await reviewsFetched(wdb, placeId))) {
           try {
             const reviewsUrl = commentsUrl(placeId);
-            const { status, body, data } = await fetchJson(reviewsUrl);
+            const { status, body, data } = await fetchJson(env, reviewsUrl);
             const parsed = data as { status?: string; commentaires?: CommentApi[] };
             if (parsed.status === "OK") {
               await ingestReviews(wdb, placeId, reviewsUrl, status, body, parsed.commentaires ?? []);
@@ -126,6 +127,36 @@ export default {
 
       if (request.method === "GET" && pathname === "/api/stream") {
         return sseStream(env);
+      }
+
+      if (request.method === "POST" && pathname === "/api/scrape/start") {
+        const result = await startScrape(env);
+        await emit(writeDb(env), `scrape started (cap → ${result.cap})`);
+        return json({ ok: true, ...result });
+      }
+
+      if (request.method === "POST" && pathname === "/api/scrape/pause") {
+        await pauseScrape(env);
+        await emit(writeDb(env), "scrape paused — no more downloads");
+        return json({ ok: true, paused: true });
+      }
+
+      if (request.method === "POST" && pathname === "/api/scrape/resume") {
+        const result = await resumeScrape(env);
+        await emit(writeDb(env), "scrape resumed");
+        return json({ ok: true, ...result });
+      }
+
+      if (request.method === "POST" && pathname === "/api/scrape/toggle") {
+        const state = await getState(readDb(env));
+        if (state.paused) {
+          const result = await resumeScrape(env);
+          await emit(writeDb(env), "scrape resumed");
+          return json({ ok: true, ...result, action: "resume" });
+        }
+        await pauseScrape(env);
+        await emit(writeDb(env), "scrape paused — no more downloads");
+        return json({ ok: true, paused: true, action: "pause" });
       }
 
       if (request.method === "POST" && pathname === "/api/crawl") {
@@ -242,9 +273,10 @@ function sseStream(env: Env): Response {
           const state = await getState(readDb(env));
           let work: "did_work" | "idle" | "paused" = "paused";
           if (!state.paused) {
-            await queueNextDiscoveryCells(writeDb(env), 3);
             work = await processOneJob(env, owner);
-            await maybeCompletePass(writeDb(env));
+            if (work === "idle") {
+              await seedFilterJob(writeDb(env), env);
+            }
           }
 
           const places = await listPlacesGeoSince(env, sinceIso);
@@ -256,6 +288,16 @@ function sseStream(env: Env): Response {
           const evs = await eventsSince(readDb(env), afterEvent, 30);
           for (const e of evs) {
             afterEvent = Math.max(afterEvent, Number((e as { id: number }).id));
+            const row = e as { level: string; meta_json?: string | null };
+            if (row.level === "pin" && row.meta_json) {
+              try {
+                const meta = JSON.parse(row.meta_json) as { pin?: unknown };
+                if (meta.pin) send("place", meta.pin);
+              } catch {
+                /* skip bad meta */
+              }
+              continue;
+            }
             send("log", e);
           }
 
