@@ -1,0 +1,23 @@
+const CACHE = "p5n-shell-v1";
+const SHELL = ["/app/", "/app/assets/index.js", "/app/assets/index.css"];
+
+self.addEventListener("install", (ev) => {
+  ev.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener("activate", (ev) => {
+  ev.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))),
+    ).then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener("fetch", (ev) => {
+  const url = new URL(ev.request.url);
+  if (url.pathname.startsWith("/app/") && !url.pathname.includes("/api")) {
+    ev.respondWith(
+      caches.match(ev.request).then((cached) => cached ?? fetch(ev.request)),
+    );
+  }
+});

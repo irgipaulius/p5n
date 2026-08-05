@@ -8,13 +8,14 @@ import {
   getState,
   ingestNewPlacesFromFilter,
   ingestReviews,
-  knownPlacesCount,
   markCellDone,
   markCellError,
+  placesCount,
   reclaimStaleLeases,
   refreshKnownPlace,
   resolveJob,
   slimPlace,
+  writeDb,
 } from "./db";
 import type { CommentApi, Env, JobRow, PlaceApi } from "./types";
 
@@ -25,6 +26,7 @@ function sleep(ms: number): Promise<void> {
 const MAX_REFRESH_PER_FILTER = 25;
 
 async function handleJob(env: Env, job: JobRow, _owner: string) {
+  const db = writeDb(env);
   const payload = JSON.parse(job.payload_json) as Record<string, unknown>;
 
   if (job.kind === "filter_cell") {
@@ -42,10 +44,10 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
       if (parsed.status !== "OK") throw new Error(`filter not OK: ${body.slice(0, 200)}`);
 
       const places = parsed.lieux ?? [];
-      const { newCount, knownSeen } = await ingestNewPlacesFromFilter(env.DB, places, body.length);
-      const known = await knownPlacesCount(env.DB);
+      const { newCount, knownSeen } = await ingestNewPlacesFromFilter(db, places, body.length);
+      const known = await placesCount(db);
       await emit(
-        env.DB,
+        db,
         `filter ${lat},${lng}: wire=${places.length} +${newCount} new (archive=${known}) mode=${mode}`,
         "info",
         { http_status: status, wire_bytes: body.length, new: newCount },
@@ -57,7 +59,7 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
           if (queued >= MAX_REFRESH_PER_FILTER) break;
           const placeId = String(place.id);
           await enqueueJob(
-            env.DB,
+            db,
             "place_refresh",
             { place: slimPlace(place) },
             `refresh:${placeId}`,
@@ -68,11 +70,11 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
       }
 
       if (cellId != null && passId != null) {
-        await markCellDone(env.DB, passId, cellId, places.length);
+        await markCellDone(db, passId, cellId, places.length);
       }
     } catch (err) {
       if (cellId != null && passId != null) {
-        await markCellError(env.DB, passId, cellId, err instanceof Error ? err.message : String(err));
+        await markCellError(db, passId, cellId, err instanceof Error ? err.message : String(err));
       }
       throw err;
     }
@@ -82,8 +84,8 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
   if (job.kind === "place_refresh") {
     const place = payload.place as PlaceApi;
     if (!place?.id) throw new Error("place_refresh missing place");
-    await refreshKnownPlace(env.DB, place);
-    await emit(env.DB, `refreshed place ${place.id}`, "info");
+    await refreshKnownPlace(db, place);
+    await emit(db, `refreshed place ${place.id}`, "info");
     return;
   }
 
@@ -94,8 +96,8 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
     if (status >= 500) throw new Error(`commGet HTTP ${status}`);
     const parsed = data as { status?: string; commentaires?: CommentApi[] };
     if (parsed.status !== "OK") throw new Error(`commGet not OK: ${body.slice(0, 200)}`);
-    const n = await ingestReviews(env.DB, placeId, url, status, body, parsed.commentaires ?? []);
-    await emit(env.DB, `reviews place ${placeId}: ${n} comments`, "info", {
+    const n = await ingestReviews(db, placeId, url, status, body, parsed.commentaires ?? []);
+    await emit(db, `reviews place ${placeId}: ${n} comments`, "info", {
       http_status: status,
       bytes: body.length,
     });
@@ -106,20 +108,21 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
 }
 
 export async function processOneJob(env: Env, owner: string): Promise<"did_work" | "idle" | "paused"> {
-  const state = await getState(env.DB);
+  const db = writeDb(env);
+  const state = await getState(db);
   if (state.paused) return "paused";
 
-  const job = await claimJob(env.DB, owner);
+  const job = await claimJob(db, owner);
   if (!job) return "idle";
 
   try {
     await handleJob(env, job, owner);
-    await resolveJob(env.DB, job, owner);
+    await resolveJob(db, job, owner);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const outcome = await resolveJob(env.DB, job, owner, msg);
+    const outcome = await resolveJob(db, job, owner, msg);
     await emit(
-      env.DB,
+      db,
       `job ${job.kind} ${job.id} ${outcome}: ${msg}`,
       outcome === "retry" ? "info" : "error",
       { attempts: job.attempts },
@@ -132,29 +135,30 @@ export async function runCrawlLoop(
   env: Env,
   opts: { maxSteps?: number; seed?: boolean } = {},
 ): Promise<{ steps: number; stopped: string }> {
+  const db = writeDb(env);
   const lat = Number(env.DEFAULT_LAT || 41.688908);
   const lng = Number(env.DEFAULT_LNG || 19.641004);
 
-  const reclaimed = await reclaimStaleLeases(env.DB);
-  if (reclaimed) await emit(env.DB, `reclaimed ${reclaimed} stale lease(s)`);
+  const reclaimed = await reclaimStaleLeases(db);
+  if (reclaimed) await emit(db, `reclaimed ${reclaimed} stale lease(s)`);
 
   const owner = `worker-${crypto.randomUUID().slice(0, 8)}`;
   const maxSteps = opts.maxSteps ?? 200;
-  const state0 = await getState(env.DB);
+  const state0 = await getState(db);
 
   if (opts.seed !== false) {
-    const known = await knownPlacesCount(env.DB);
-    const pending = await env.DB.prepare(
+    const known = await placesCount(db);
+    const pending = await db.prepare(
       "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')",
     ).first<{ n: number }>();
     if (known === 0 && (pending?.n ?? 0) === 0) {
       const jid = `filter:${lat.toFixed(5)}:${lng.toFixed(5)}`;
-      await enqueueJob(env.DB, "filter_cell", { lat, lng, mode: "new_only" }, jid);
-      await emit(env.DB, `enqueued filter cell ${lat},${lng}`, "info", { job_id: jid });
+      await enqueueJob(db, "filter_cell", { lat, lng, mode: "new_only" }, jid);
+      await emit(db, `enqueued filter cell ${lat},${lng}`, "info", { job_id: jid });
     }
   }
 
-  await emit(env.DB, `crawl loop started (${owner})`, "info", { max_places: state0.max_places });
+  await emit(db, `crawl loop started (${owner})`, "info", { max_places: state0.max_places });
 
   let steps = 0;
   let idle = 0;
@@ -164,11 +168,11 @@ export async function runCrawlLoop(
     if (result === "paused") return { steps, stopped: "paused" };
     if (result === "idle") {
       idle += 1;
-      const pending = await env.DB.prepare(
+      const pending = await db.prepare(
         "SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'",
       ).first<{ n: number }>();
       if ((pending?.n ?? 0) === 0) {
-        await emit(env.DB, "queue empty — crawl loop stopping");
+        await emit(db, "queue empty — crawl loop stopping");
         return { steps, stopped: "empty" };
       }
       if (idle >= 5) return { steps, stopped: "idle" };
@@ -179,6 +183,6 @@ export async function runCrawlLoop(
     steps += 1;
   }
 
-  await emit(env.DB, `crawl loop hit maxSteps=${maxSteps}`);
+  await emit(db, `crawl loop hit maxSteps=${maxSteps}`);
   return { steps, stopped: "max_steps" };
 }

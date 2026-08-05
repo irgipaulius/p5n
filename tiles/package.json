@@ -1,0 +1,11 @@
+{
+  "name": "@p5n/tiles",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "export": "node export.mjs",
+    "bake": "node bake.mjs",
+    "upload": "node upload.mjs",
+    "all": "npm run export && npm run bake"
+  }
+}

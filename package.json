@@ -1,17 +1,27 @@
 {
   "name": "p5n",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
+  "workspaces": ["sdk", "app", "tiles"],
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev:app": "npm run dev -w @p5n/app",
+    "dev:all": "concurrently \"npm run dev\" \"npm run dev:app\"",
+    "deploy": "npm run app:build && wrangler deploy",
+    "app:build": "npm run build -w @p5n/app",
+    "app:dev": "npm run dev -w @p5n/app",
+    "tiles:export": "npm run export -w @p5n/tiles",
+    "tiles:bake": "npm run bake -w @p5n/tiles",
+    "tiles:all": "npm run all -w @p5n/tiles",
     "db:local": "wrangler d1 migrations apply p5n --local",
     "db:remote": "wrangler d1 migrations apply p5n --remote",
-    "typecheck": "tsc --noEmit"
+    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:local",
+    "typecheck": "tsc --noEmit && npm run typecheck -w @p5n/sdk --if-present"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260801.1",
+    "concurrently": "^9.2.0",
     "typescript": "^5.8.3",
     "wrangler": "^4.28.0"
   }

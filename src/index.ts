@@ -9,22 +9,29 @@ import {
   getPlaceFull,
   getStats,
   ingestReviews,
-  knownPlacesCount,
   listPlaces,
   listPlacesGeo,
   listPlacesGeoSince,
   maxEventId,
-  maxSnapshotId,
   maybeCompletePass,
+  placesCount,
   queueNextDiscoveryCells,
+  readDb,
   recentEvents,
   reclaimStaleLeases,
   reviewsFetched,
   setContinuousPaused,
   setPaused,
   startPass,
+  writeDb,
 } from "./db";
-import { renderDashboard } from "./dashboard";
+import {
+  handleAttributes,
+  handleBboxPins,
+  handleEnrich,
+  handleStreamingSearch,
+  handleTileManifest,
+} from "./geo-api";
 import { buildEuropeGrid } from "./placeTypes";
 import type { CommentApi, Env } from "./types";
 
@@ -34,51 +41,86 @@ export default {
     const { pathname } = url;
 
     try {
-      if (request.method === "GET" && pathname === "/") {
-        const [stats, events] = await Promise.all([getStats(env.DB), recentEvents(env.DB, 40)]);
-        return html(renderDashboard(stats as unknown as Record<string, unknown>, events));
+      // Static app assets (built dashboard)
+      if (request.method === "GET" && pathname.startsWith("/app/")) {
+        if (env.ASSETS) return env.ASSETS.fetch(request);
+        return serveAppAsset(pathname);
+      }
+
+      if (request.method === "GET" && (pathname === "/" || pathname === "/dashboard")) {
+        if (env.ASSETS) {
+          const url = new URL(request.url);
+          url.pathname = "/app/index.html";
+          return env.ASSETS.fetch(new Request(url, request));
+        }
+        return serveAppIndex();
       }
 
       if (request.method === "GET" && pathname === "/api/stats") {
-        return json(await getStats(env.DB));
+        return json(await getStats(readDb(env)));
+      }
+
+      if (request.method === "GET" && pathname === "/api/pins/bbox") {
+        return handleBboxPins(env, url);
+      }
+
+      if (request.method === "GET" && pathname === "/api/enrich") {
+        return handleEnrich(env, url);
+      }
+
+      if (request.method === "GET" && pathname === "/api/search") {
+        return handleStreamingSearch(env, url);
+      }
+
+      if (request.method === "GET" && pathname === "/api/attributes") {
+        return handleAttributes(env);
+      }
+
+      if (request.method === "GET" && pathname === "/api/tiles/manifest") {
+        return handleTileManifest(env, request);
       }
 
       if (request.method === "GET" && pathname === "/api/places/geo") {
-        return json(await listPlacesGeo(env.DB), 200, { "cache-control": "no-store" });
+        return json(await listPlacesGeo(env), 200, { "cache-control": "no-store" });
       }
 
       if (request.method === "GET" && pathname === "/api/places") {
         const limit = Number(url.searchParams.get("limit") || 50);
-        return json(await listPlaces(env.DB, limit));
+        return json(await listPlaces(readDb(env), limit));
       }
 
       const placeMatch = pathname.match(/^\/api\/places\/([^/]+)$/);
       if (request.method === "GET" && placeMatch) {
         const placeId = decodeURIComponent(placeMatch[1]);
-        if (!(await reviewsFetched(env.DB, placeId))) {
+        const wdb = writeDb(env);
+        if (!(await reviewsFetched(wdb, placeId))) {
           try {
             const reviewsUrl = commentsUrl(placeId);
             const { status, body, data } = await fetchJson(reviewsUrl);
             const parsed = data as { status?: string; commentaires?: CommentApi[] };
             if (parsed.status === "OK") {
-              await ingestReviews(env.DB, placeId, reviewsUrl, status, body, parsed.commentaires ?? []);
-              await emit(env.DB, `on-demand reviews for ${placeId}`);
+              await ingestReviews(wdb, placeId, reviewsUrl, status, body, parsed.commentaires ?? []);
+              await emit(wdb, `on-demand reviews for ${placeId}`);
             }
           } catch (err) {
             await emit(
-              env.DB,
+              wdb,
               `on-demand reviews failed for ${placeId}: ${err instanceof Error ? err.message : err}`,
               "error",
             );
           }
         }
-        const row = await getPlaceFull(env.DB, placeId);
+        const row = await getPlaceFull(env, placeId);
         if (!row) return json({ error: "not found" }, 404);
-        return json(row);
+        return json(row, 200, { "cache-control": "public, max-age=60" });
+      }
+
+      if (request.method === "GET" && pathname.startsWith("/tiles/")) {
+        return serveTile(env, pathname.slice("/tiles/".length));
       }
 
       if (request.method === "GET" && pathname === "/api/events") {
-        return json(await recentEvents(env.DB, Number(url.searchParams.get("limit") || 50)));
+        return json(await recentEvents(readDb(env), Number(url.searchParams.get("limit") || 50)));
       }
 
       if (request.method === "GET" && pathname === "/api/stream") {
@@ -87,51 +129,50 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/crawl") {
         const batch = Number(env.MAX_PLACES || 10);
-        const known = await knownPlacesCount(env.DB);
-        await bumpMaxPlaces(env.DB, known + batch);
+        const known = await placesCount(writeDb(env));
+        await bumpMaxPlaces(writeDb(env), known + batch);
         const lat = Number(env.DEFAULT_LAT || 41.688908);
         const lng = Number(env.DEFAULT_LNG || 19.641004);
-        await reclaimStaleLeases(env.DB);
+        await reclaimStaleLeases(writeDb(env));
         await enqueueJob(
-          env.DB,
+          writeDb(env),
           "filter_cell",
           { lat, lng, mode: "new_only" },
           `filter:${lat.toFixed(5)}:${lng.toFixed(5)}:${known}:${Date.now()}`,
         );
-        await emit(env.DB, `crawl +${batch} near point (cap → ${known + batch})`);
+        await emit(writeDb(env), `crawl +${batch} near point (cap → ${known + batch})`);
         return json({ ok: true, started: true, cap: known + batch, batch });
       }
 
       if (request.method === "POST" && pathname === "/api/crawl/full") {
-        // New archive pass over the grid — does NOT delete any spots.
         const cells = buildEuropeGrid(1);
-        const { passId, cells: n } = await startPass(env.DB, "full", cells);
-        await reclaimStaleLeases(env.DB);
-        await queueNextDiscoveryCells(env.DB, 5);
-        await emit(env.DB, `full pass #${passId} started — ${n} cells (append-only archive)`);
+        const { passId, cells: n } = await startPass(writeDb(env), "full", cells);
+        await reclaimStaleLeases(writeDb(env));
+        await queueNextDiscoveryCells(writeDb(env), 5);
+        await emit(writeDb(env), `full pass #${passId} started — ${n} cells (append-only archive)`);
         return json({ ok: true, pass_id: passId, cells: n, mode: "full" });
       }
 
       if (request.method === "POST" && pathname === "/api/crawl/new") {
         const cells = buildEuropeGrid(1);
-        const { passId, cells: n } = await startPass(env.DB, "new_only", cells);
-        await reclaimStaleLeases(env.DB);
-        await queueNextDiscoveryCells(env.DB, 5);
-        await emit(env.DB, `fetch-new pass #${passId} started — ${n} cells (unknowns only)`);
+        const { passId, cells: n } = await startPass(writeDb(env), "new_only", cells);
+        await reclaimStaleLeases(writeDb(env));
+        await queueNextDiscoveryCells(writeDb(env), 5);
+        await emit(writeDb(env), `fetch-new pass #${passId} started — ${n} cells (unknowns only)`);
         return json({ ok: true, pass_id: passId, cells: n, mode: "new_only" });
       }
 
       if (request.method === "POST" && pathname === "/api/control/continuous/pause") {
-        await setContinuousPaused(env.DB, true);
-        await emit(env.DB, "continuous crawl paused — resume will continue this pass");
+        await setContinuousPaused(writeDb(env), true);
+        await emit(writeDb(env), "continuous crawl paused — resume will continue this pass");
         return json({ ok: true, continuous_paused: true });
       }
 
       if (request.method === "POST" && pathname === "/api/control/continuous/resume") {
-        await setContinuousPaused(env.DB, false);
-        await reclaimStaleLeases(env.DB);
-        await queueNextDiscoveryCells(env.DB, 5);
-        await emit(env.DB, "continuous crawl resumed");
+        await setContinuousPaused(writeDb(env), false);
+        await reclaimStaleLeases(writeDb(env));
+        await queueNextDiscoveryCells(writeDb(env), 5);
+        await emit(writeDb(env), "continuous crawl resumed");
         return json({ ok: true, continuous_paused: false });
       }
 
@@ -141,21 +182,21 @@ export default {
       }
 
       if (request.method === "POST" && pathname === "/api/control/pause") {
-        await setPaused(env.DB, true);
-        await emit(env.DB, "paused via dashboard");
+        await setPaused(writeDb(env), true);
+        await emit(writeDb(env), "paused via dashboard");
         return json({ ok: true, paused: true });
       }
 
       if (request.method === "POST" && pathname === "/api/control/resume") {
-        await setPaused(env.DB, false);
-        await emit(env.DB, "resumed via dashboard");
+        await setPaused(writeDb(env), false);
+        await emit(writeDb(env), "resumed via dashboard");
         return json({ ok: true, paused: false });
       }
 
       if (request.method === "POST" && pathname.startsWith("/api/control/rescrape/")) {
         const placeId = pathname.split("/").pop()!;
-        const jid = await enqueueJob(env.DB, "rescrape_place", { place_id: placeId });
-        await emit(env.DB, `enqueued rescrape ${placeId}`, "info", { job_id: jid });
+        const jid = await enqueueJob(writeDb(env), "rescrape_place", { place_id: placeId });
+        await emit(writeDb(env), `enqueued rescrape ${placeId}`, "info", { job_id: jid });
         return json({ ok: true, job_id: jid });
       }
 
@@ -174,6 +215,8 @@ export default {
 function sseStream(env: Env): Response {
   let closed = false;
   const owner = `sse-${crypto.randomUUID().slice(0, 8)}`;
+  let sinceIso = new Date(0).toISOString();
+
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
@@ -186,32 +229,31 @@ function sseStream(env: Env): Response {
         }
       };
 
-      let afterSnap = await maxSnapshotId(env.DB);
-      let afterEvent = await maxEventId(env.DB);
-      await reclaimStaleLeases(env.DB);
-      send("hello", { afterSnap, afterEvent });
-      send("stats", await getStats(env.DB));
+      let afterEvent = await maxEventId(writeDb(env));
+      await reclaimStaleLeases(writeDb(env));
+      send("hello", { sinceIso, afterEvent });
+      send("stats", await getStats(readDb(env)));
 
       while (!closed) {
         try {
-          await queueNextDiscoveryCells(env.DB, 3);
+          await queueNextDiscoveryCells(writeDb(env), 3);
           const work = await processOneJob(env, owner);
-          await maybeCompletePass(env.DB);
+          await maybeCompletePass(writeDb(env));
 
-          const places = await listPlacesGeoSince(env.DB, afterSnap);
+          const places = await listPlacesGeoSince(env, sinceIso);
           for (const p of places) {
-            afterSnap = Math.max(afterSnap, Number(p.snapshot_id));
+            sinceIso = p.updated_at;
             send("place", p);
           }
 
-          const evs = await eventsSince(env.DB, afterEvent, 30);
+          const evs = await eventsSince(readDb(env), afterEvent, 30);
           for (const e of evs) {
             afterEvent = Math.max(afterEvent, Number((e as { id: number }).id));
             send("log", e);
           }
 
           if (places.length || evs.length || work === "did_work") {
-            send("stats", await getStats(env.DB));
+            send("stats", await getStats(readDb(env)));
           } else {
             send("ping", { t: Date.now() });
           }
@@ -239,15 +281,47 @@ function sseStream(env: Env): Response {
   });
 }
 
+async function serveTile(env: Env, key: string): Promise<Response> {
+  if (!env.TILES) {
+    return json({ error: "R2 TILES binding not configured" }, 503);
+  }
+  const obj = await env.TILES.get(key);
+  if (!obj) return json({ error: "not found" }, 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set("cache-control", "public, max-age=31536000, immutable");
+  headers.set("accept-ranges", "bytes");
+  if (!headers.has("content-type")) {
+    headers.set("content-type", key.endsWith(".json") ? "application/json" : "application/octet-stream");
+  }
+  return new Response(obj.body, { headers });
+}
+
+function serveAppIndex(): Response {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>p5n dashboard</title>
+  <script type="module" crossorigin src="/app/assets/index.js"></script>
+  <link rel="stylesheet" crossorigin href="/app/assets/index.css">
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>`;
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+async function serveAppAsset(pathname: string): Promise<Response> {
+  // Built assets are served from R2 or embedded fallback in dev via vite proxy
+  return json({ error: "build app first: npm run app:build", path: pathname }, 404);
+}
+
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: { "content-type": "application/json; charset=utf-8", ...extraHeaders },
-  });
-}
-
-function html(body: string): Response {
-  return new Response(body, {
-    headers: { "content-type": "text/html; charset=utf-8" },
   });
 }

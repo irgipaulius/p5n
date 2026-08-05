@@ -1,0 +1,135 @@
+:root {
+  color-scheme: dark light;
+  --bg: #0f172a;
+  --panel: rgba(15, 23, 42, 0.92);
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --border: rgba(148, 163, 184, 0.25);
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+
+.layout {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  z-index: 2;
+}
+
+.topbar input[type="search"] {
+  flex: 1 1 200px;
+  min-width: 160px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #1e293b;
+  color: var(--text);
+}
+
+.topbar button {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #1e293b;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+.topbar button:hover { border-color: var(--accent); }
+.topbar button.primary { background: #0369a1; border-color: #0284c7; }
+
+.stats {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.main {
+  position: relative;
+  min-height: 0;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+.panel {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  width: min(360px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  z-index: 1;
+  backdrop-filter: blur(8px);
+  display: none;
+}
+.panel.open { display: block; }
+
+.panel h2 { margin: 0 0 8px; font-size: 16px; }
+.panel pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  max-height: 280px;
+  overflow: auto;
+  background: #0b1220;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.log {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  width: min(420px, calc(100% - 24px));
+  max-height: 120px;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  z-index: 1;
+}
+
+.type-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.type-filters label {
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #1e293b;
+}
+
+.progress {
+  font-size: 11px;
+  color: var(--accent);
+}

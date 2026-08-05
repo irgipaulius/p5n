@@ -8,12 +8,23 @@ MAX_PLACES = "10"
 REQUEST_DELAY_MS = "300"
 DEFAULT_LAT = "41.688908"
 DEFAULT_LNG = "19.641004"
+TILES_PUBLIC_URL = "http://127.0.0.1:8787"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "p5n"
 database_id = "00000000-0000-0000-0000-000000000001"
 migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "TILES"
+bucket_name = "p5n-tiles"
+preview_bucket_name = "p5n-tiles-preview"
+
+[assets]
+directory = "./app/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
 
 [triggers]
 crons = ["*/2 * * * *"]

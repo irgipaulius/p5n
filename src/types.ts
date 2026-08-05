@@ -1,12 +1,15 @@
 export interface Env {
   DB: D1Database;
+  TILES?: R2Bucket;
+  ASSETS?: Fetcher;
   MAX_PLACES: string;
   REQUEST_DELAY_MS: string;
   DEFAULT_LAT: string;
   DEFAULT_LNG: string;
+  TILES_PUBLIC_URL?: string;
 }
 
-/** Job kinds — claim order prefers discovery/new over refresh/reviews. */
+/** Job kinds — claim order prefers discovery over refresh/reviews. */
 export type JobKind =
   | "filter_cell"
   | "place_refresh"
@@ -30,11 +33,11 @@ export interface CrawlerState {
   max_places: number;
   places_crawled: number;
   request_delay_ms: number;
+  prefer_new: number;
+  continuous_paused: number;
+  pass_id: number;
+  pass_mode: string;
   updated_at: string;
-  prefer_new?: number;
-  continuous_paused?: number;
-  pass_id?: number;
-  pass_mode?: string;
 }
 
 export interface PlaceApi {
@@ -62,5 +65,68 @@ export interface CommentApi {
   note?: string;
   uuid?: string;
   date_creation?: string;
+  commentaire?: string;
+  type_vehicule?: string;
   [key: string]: unknown;
+}
+
+export interface PlaceRow {
+  place_id: string;
+  source: string;
+  lat: number;
+  lng: number;
+  geohash4: string;
+  geohash6: string;
+  type: string;
+  rating: number | null;
+  review_count: number;
+  attrs0: number;
+  attrs1: number;
+  name: string | null;
+  city: string | null;
+  country: string | null;
+  updated_at: string;
+  reviews_fetched: number;
+}
+
+export interface PinGeo {
+  id: string;
+  lat: number;
+  lng: number;
+  t: number;
+  type: string;
+  name: string | null;
+  updated_at: string;
+}
+
+export interface EnrichPin {
+  id: string;
+  lat: number;
+  lng: number;
+  t: number;
+  type: string;
+  rating: number | null;
+  reviews: number;
+  attrs0: number;
+  attrs1: number;
+  name: string | null;
+}
+
+export interface SearchPin {
+  id: string;
+  lat: number;
+  lng: number;
+  t: number;
+  type: string;
+  name: string | null;
+  rating: number | null;
+  reviews: number;
+  score?: number;
+}
+
+export interface AttributeDef {
+  bit_index: number;
+  column_name: "attrs0" | "attrs1";
+  key: string;
+  label: string;
 }

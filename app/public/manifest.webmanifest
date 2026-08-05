@@ -1,0 +1,9 @@
+{
+  "name": "p5n map",
+  "short_name": "p5n",
+  "start_url": "/app/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": []
+}

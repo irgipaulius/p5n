@@ -19,3 +19,5 @@ node_modules/
 .wrangler/
 .dev.vars
 *.log
+tiles/out/
+app/dist/
