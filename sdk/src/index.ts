@@ -26,15 +26,20 @@ export class P5nMap {
   private layerAttach?: () => void;
   dark: boolean;
 
+  private layersReady: Promise<void>;
+  private resolveLayersReady!: () => void;
+
   constructor(container: HTMLElement, config: P5nConfig) {
     this.config = config;
     this.dark = config.dark ?? true;
+    this.layersReady = new Promise((resolve) => {
+      this.resolveLayersReady = resolve;
+    });
     registerPmtilesProtocol();
     this.map = createMap(container, config);
     this.map.on("load", () => {
       this.styleReady = true;
-      void this.attachSources();
-      this.flushDeltaPins();
+      void this.attachSources().then(() => this.resolveLayersReady());
     });
   }
 
@@ -47,26 +52,25 @@ export class P5nMap {
       addPinsVectorSource(this.map, this.pinsSourceId, url);
       addPinLayers(this.map, this.pinsSourceId);
     }
-    this.ensureDeltaLayer();
+    await this.ensureDeltaLayer();
     this.layerAttach = () => {
-      if (url && !this.map.getSource(this.pinsSourceId)) {
-        addPinsVectorSource(this.map, this.pinsSourceId, url);
-        addPinLayers(this.map, this.pinsSourceId);
-      }
-      this.ensureDeltaLayer();
-      this.flushDeltaPins();
+      void this.attachSources();
     };
   }
 
-  private ensureDeltaLayer(): void {
+  /** Wait until pin sources/layers are on the map. */
+  whenReady(): Promise<void> {
+    return this.layersReady;
+  }
+
+  private async ensureDeltaLayer(): Promise<void> {
     if (!this.map.isStyleLoaded()) return;
-    void registerPinIcons(this.map).then(() => {
-      addDeltaGeoJsonSource(this.map, this.deltaSourceId);
-      addDeltaPinLayers(this.map, this.deltaSourceId);
-      this.ensureSearchLayer();
-      this.flushDeltaPins();
-      this.flushSearchResults();
-    });
+    await registerPinIcons(this.map);
+    addDeltaGeoJsonSource(this.map, this.deltaSourceId);
+    addDeltaPinLayers(this.map, this.deltaSourceId);
+    this.ensureSearchLayer();
+    this.flushDeltaPins();
+    this.flushSearchResults();
   }
 
   private ensureSearchLayer(): void {
@@ -77,12 +81,26 @@ export class P5nMap {
         promoteId: "id",
       });
       this.map.addLayer({
+        id: "search-results-circles",
+        type: "circle",
+        source: "search-results",
+        minzoom: 0,
+        maxzoom: 11,
+        paint: {
+          "circle-radius": 8,
+          "circle-color": "#f472b6",
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#fff",
+        },
+      });
+      this.map.addLayer({
         id: "search-results-symbols",
         type: "symbol",
         source: "search-results",
+        minzoom: 11,
         layout: {
           "icon-image": iconImageExpression(),
-          "icon-size": 1,
+          "icon-size": 0.9,
           "icon-allow-overlap": true,
         },
       });
@@ -137,10 +155,15 @@ export class P5nMap {
   }
 
   watchSystemTheme(): () => void {
-    return watchTheme(this.map, (d) => {
-      this.dark = d;
-      setMapTheme(this.map, d, this.layerAttach);
-    });
+    return watchTheme(
+      this.map,
+      (d) => {
+        this.dark = d;
+        setMapTheme(this.map, d, () => void this.attachSources());
+      },
+      () => void this.attachSources(),
+      { skipInitial: true },
+    );
   }
 
   onMoveEndEnrich(since?: string): void {
@@ -150,12 +173,13 @@ export class P5nMap {
   }
 
   addLivePin(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): void {
+    const t = Number(pin.t) || 3;
     const idx = this.deltaFeatures.findIndex((f) => String(f.properties?.id) === pin.id);
     const feature: GeoJSON.Feature = {
       type: "Feature",
       id: pin.id,
       geometry: { type: "Point", coordinates: [pin.lng, pin.lat] },
-      properties: { id: pin.id, t: pin.t, name: pin.name ?? "" },
+      properties: { id: pin.id, t, name: pin.name ?? "" },
     };
     if (idx >= 0) this.deltaFeatures[idx] = feature;
     else this.deltaFeatures.push(feature);

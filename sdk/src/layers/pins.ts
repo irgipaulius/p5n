@@ -20,13 +20,13 @@ export function addPinLayers(
       source: sourceId,
       "source-layer": sourceLayer,
       minzoom: 0,
-      maxzoom: 9,
+      maxzoom: 11,
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 2, 8, 4],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 3, 8, 5, 11, 7],
         "circle-color": typeColorMatch(),
-        "circle-stroke-width": 1,
+        "circle-stroke-width": 1.5,
         "circle-stroke-color": "#0f172a",
-        "circle-opacity": 0.85,
+        "circle-opacity": 0.95,
       },
     });
   }
@@ -37,10 +37,10 @@ export function addPinLayers(
       type: "symbol",
       source: sourceId,
       "source-layer": sourceLayer,
-      minzoom: 9,
+      minzoom: 11,
       layout: {
         "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.55, 14, 0.85, 18, 1],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 11, 0.65, 16, 1],
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
@@ -58,12 +58,13 @@ export function addDeltaPinLayers(map: maplibregl.Map, sourceId = "pins-delta"):
       type: "circle",
       source: sourceId,
       minzoom: 0,
-      maxzoom: 9,
+      maxzoom: 11,
       paint: {
-        "circle-radius": 5,
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 4, 11, 8],
         "circle-color": typeColorMatch(),
-        "circle-stroke-width": 1.5,
+        "circle-stroke-width": 2,
         "circle-stroke-color": "#fff",
+        "circle-opacity": 0.95,
       },
     });
   }
@@ -73,10 +74,10 @@ export function addDeltaPinLayers(map: maplibregl.Map, sourceId = "pins-delta"):
       id: symbolId,
       type: "symbol",
       source: sourceId,
-      minzoom: 9,
+      minzoom: 11,
       layout: {
         "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.6, 14, 0.9],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 11, 0.7, 16, 1],
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
@@ -110,6 +111,7 @@ export function allPinLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"):
     `${sourceId}-symbols`,
     `${deltaId}-circles`,
     `${deltaId}-symbols`,
+    "search-results-circles",
     "search-results-symbols",
   ];
 }

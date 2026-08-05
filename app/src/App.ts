@@ -83,17 +83,18 @@ export function mountApp(root: HTMLElement): void {
   const selectedAttrs = new Set<string>();
 
   void (async () => {
+    await p5n.whenReady();
     await p5n.tryOfflineFirst();
     await p5n.initTilesFromManifest();
     p5n.watchSystemTheme();
     p5n.onMoveEndEnrich();
     const n = await p5n.loadExistingPins();
     statusEl.textContent = n ? `${n} pins` : "ready";
+    p5n.filterTypes([...selectedTypes]);
     await refreshStats();
     await loadAttributes();
     buildTypeFilters();
     buildAttrFilters();
-    p5n.filterTypes([...selectedTypes]);
   })();
 
   p5n.onPinClick(async (placeId) => {
