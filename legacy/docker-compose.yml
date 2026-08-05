@@ -1,0 +1,21 @@
+services:
+  crawler:
+    build: .
+    command: ["p5n", "crawl", "--db", "/data/p5n.sqlite", "--max-places", "50"]
+    volumes:
+      - ./data:/data
+    environment:
+      P5N_DB: /data/p5n.sqlite
+    restart: "no"
+
+  dashboard:
+    build: .
+    command: ["p5n", "serve", "--host", "0.0.0.0", "--port", "8080", "--db", "/data/p5n.sqlite"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      P5N_DB: /data/p5n.sqlite
+    depends_on:
+      - crawler

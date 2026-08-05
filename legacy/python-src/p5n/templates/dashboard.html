@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>p5n dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --text: #e7ecf1;
+      --muted: #8b9aab;
+      --accent: #3d9a78;
+      --warn: #c45c26;
+      --border: #2a3542;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --sans: "IBM Plex Sans", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background: radial-gradient(1200px 600px at 10% -10%, #1c2a24, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    h1 { margin: 0; font-size: 1.25rem; letter-spacing: 0.04em; }
+    h1 span { color: var(--accent); }
+    .controls button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.8rem;
+      margin-left: 0.35rem;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .controls button:hover { border-color: var(--accent); }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      padding: 1rem 1.5rem 2rem;
+    }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    section {
+      background: color-mix(in srgb, var(--panel) 92%, black);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      min-height: 200px;
+    }
+    h2 { margin: 0 0 0.75rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.75rem; }
+    .stat { background: #121820; padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border); }
+    .stat .n { font-family: var(--mono); font-size: 1.35rem; }
+    .stat .l { color: var(--muted); font-size: 0.75rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    #events { font-family: var(--mono); font-size: 0.75rem; max-height: 360px; overflow: auto; }
+    #events div { padding: 0.25rem 0; border-bottom: 1px solid #222; color: #c5d0db; }
+    #events .error { color: #e07a5f; }
+    .full { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span>p5n</span> crawler</h1>
+    <div class="controls">
+      <button onclick="post('/api/control/pause')">Pause</button>
+      <button onclick="post('/api/control/resume')">Resume</button>
+    </div>
+  </header>
+  <main>
+    <section>
+      <h2>Stats</h2>
+      <div class="stats" id="stats">
+        <div class="stat"><div class="n" id="s-places">{{ stats.known_places }}</div><div class="l">places</div></div>
+        <div class="stat"><div class="n" id="s-cap">{{ stats.state.max_places }}</div><div class="l">max places</div></div>
+        <div class="stat"><div class="n" id="s-reviews">{{ stats.review_snapshots }}</div><div class="l">review rows</div></div>
+        <div class="stat"><div class="n" id="s-bytes">{{ stats.raw_bytes }}</div><div class="l">raw bytes in</div></div>
+        <div class="stat"><div class="n" id="s-paused">{{ 'yes' if stats.state.paused else 'no' }}</div><div class="l">paused</div></div>
+      </div>
+    </section>
+    <section>
+      <h2>Live events</h2>
+      <div id="events">
+        {% for e in events %}
+        <div class="{{ e.level }}">{{ e.created_at }} · {{ e.message }}</div>
+        {% endfor %}
+      </div>
+    </section>
+    <section class="full">
+      <h2>Places (latest snapshot)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>id</th><th>name</th><th>country</th><th>city</th><th>rating</th><th>reviews</th><th>fetched</th>
+          </tr>
+        </thead>
+        <tbody id="places">
+          {% for p in places %}
+          <tr>
+            <td>{{ p.place_id }}</td>
+            <td>{{ p.name }}</td>
+            <td>{{ p.country }}</td>
+            <td>{{ p.city }}</td>
+            <td>{{ p.rating }}</td>
+            <td>{{ p.review_count }}</td>
+            <td>{{ p.reviews_fetched }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    async function post(url) {
+      await fetch(url, { method: 'POST' });
+      location.reload();
+    }
+    const ev = document.getElementById('events');
+    const es = new EventSource('/api/events/stream');
+    es.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+      const div = document.createElement('div');
+      div.className = data.level || '';
+      div.textContent = `${data.created_at} · ${data.message}`;
+      ev.prepend(div);
+    };
+    es.addEventListener('stats', (msg) => {
+      const s = JSON.parse(msg.data);
+      document.getElementById('s-places').textContent = s.known_places;
+      document.getElementById('s-cap').textContent = s.state.max_places;
+      document.getElementById('s-reviews').textContent = s.review_snapshots;
+      document.getElementById('s-bytes').textContent = s.raw_bytes;
+      document.getElementById('s-paused').textContent = s.state.paused ? 'yes' : 'no';
+    });
+  </script>
+</body>
+</html>

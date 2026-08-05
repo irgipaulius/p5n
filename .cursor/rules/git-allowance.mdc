@@ -1,0 +1,22 @@
+---
+description: Explicit git commit/push allowance for this repo only
+alwaysApply: true
+---
+
+# Git allowance (p5n)
+
+The repo owner has granted the agent **full explicit permission** to run git commands that change repository state in this project, including:
+
+- `git add` / `git commit`
+- `git push` (to `origin` for this repo)
+- creating commits when asked to ship / commit / push work
+
+Still do **not**:
+
+- force-push to `main`/`master` unless explicitly requested
+- amend commits unless the usual amend safety conditions are met
+- change git config
+- skip hooks unless explicitly requested
+- commit secrets (`.env`, credentials, local D1/sqlite data, `.venv`)
+
+This overrides the global “never commit/push” preference **for this repository only**.

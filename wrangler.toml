@@ -1,0 +1,19 @@
+name = "p5n"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+MAX_PLACES = "10"
+REQUEST_DELAY_MS = "300"
+DEFAULT_LAT = "41.688908"
+DEFAULT_LNG = "19.641004"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "p5n"
+database_id = "00000000-0000-0000-0000-000000000001"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["*/2 * * * *"]
