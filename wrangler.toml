@@ -4,28 +4,36 @@ compatibility_date = "2025-08-01"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-MAX_PLACES = "10"
-REQUEST_DELAY_MS = "100"
+MAX_PLACES = "50000000"
+REQUEST_DELAY_MS = "750"
 DEFAULT_LAT = "41.688908"
 DEFAULT_LNG = "19.641004"
-TILES_PUBLIC_URL = "http://127.0.0.1:8787"
+TILES_PUBLIC_URL = "https://park5night.hyperreader.eu"
+
+# Set USE_D1_SESSIONS=1 in Cloudflare dashboard for production read replicas.
 
 [[d1_databases]]
 binding = "DB"
 database_name = "p5n"
-database_id = "00000000-0000-0000-0000-000000000001"
+database_id = "5aa08f10-82e4-4ab3-9615-009b5c6540d7"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "TILES"
-bucket_name = "p5n-tiles"
-preview_bucket_name = "p5n-tiles-preview"
+# R2 optional — enable in Cloudflare dashboard, then uncomment for tile baking.
+# [[r2_buckets]]
+# binding = "TILES"
+# bucket_name = "p5n-tiles"
+# preview_bucket_name = "p5n-tiles-preview"
 
 [assets]
 directory = "./app/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
-# Cron disabled by default — enable when you want unattended crawling (costs bandwidth).
-# [triggers]
-# crons = ["*/2 * * * *"]
+# Cron keeps scraping overnight when dashboard is closed (~2 req/s max to p4n).
+[triggers]
+crons = ["*/1 * * * *"]
+
+# Custom domain (zone must be on Cloudflare)
+[[routes]]
+pattern = "park5night.hyperreader.eu/*"
+zone_name = "hyperreader.eu"

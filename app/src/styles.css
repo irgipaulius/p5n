@@ -91,9 +91,23 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
 
 .stats {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.stats-warn {
+  color: #f59e0b;
+  font-weight: 600;
+}
+
+.status-error {
+  color: #ef4444 !important;
+}
+
+.log-error {
+  color: #fca5a5;
 }
 
 .status {

@@ -1,4 +1,4 @@
-import { processOneJob, runCrawlLoop } from "./crawl";
+import { runCrawlLoop, runCrawlLoopUntilPaused } from "./crawl";
 import {
   bumpMaxPlaces,
   commentsUrl,
@@ -24,6 +24,7 @@ import {
   setContinuousPaused,
   setPaused,
   startPass,
+  tryAcquireCrawlLease,
   writeDb,
 } from "./db";
 import {
@@ -34,7 +35,7 @@ import {
   handleTileManifest,
 } from "./geo-api";
 import { buildEuropeGrid } from "./placeTypes";
-import { pauseScrape, resumeScrape, seedFilterJob, startScrape } from "./scrape";
+import { pauseScrape, resumeScrape, startScrape } from "./scrape";
 import type { CommentApi, Env } from "./types";
 
 export default {
@@ -59,7 +60,7 @@ export default {
       }
 
       if (request.method === "GET" && pathname === "/api/stats") {
-        return json(await getStats(readDb(env)));
+        return json(await getStats(writeDb(env)));
       }
 
       if (request.method === "GET" && pathname === "/api/pins/bbox") {
@@ -132,7 +133,13 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/scrape/start") {
         const result = await startScrape(env);
-        await emit(writeDb(env), `scrape started (cap → ${result.cap})`);
+        ctx.waitUntil(runCrawlLoopUntilPaused(env));
+        await emit(
+          writeDb(env),
+          result.resumed
+            ? `scrape resumed — pass #${result.pass_id}`
+            : `scrape started — Europe pass #${result.pass_id} (${result.cells} cells)`,
+        );
         return json({ ok: true, ...result });
       }
 
@@ -144,6 +151,7 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/scrape/resume") {
         const result = await resumeScrape(env);
+        ctx.waitUntil(runCrawlLoopUntilPaused(env));
         await emit(writeDb(env), "scrape resumed");
         return json({ ok: true, ...result });
       }
@@ -152,6 +160,7 @@ export default {
         const state = await getState(readDb(env));
         if (state.paused) {
           const result = await resumeScrape(env);
+          ctx.waitUntil(runCrawlLoopUntilPaused(env));
           await emit(writeDb(env), "scrape resumed");
           return json({ ok: true, ...result, action: "resume" });
         }
@@ -241,16 +250,18 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const state = await getState(writeDb(env));
-    if (state.paused) return;
-    ctx.waitUntil(runCrawlLoop(env, { seed: false, maxSteps: 20 }));
+    const db = writeDb(env);
+    const state = await getState(db);
+    if (state.paused || state.storage_handbrake) return;
+    const owner = `cron-${Date.now()}`;
+    if (!(await tryAcquireCrawlLease(db, owner, 55))) return;
+    ctx.waitUntil(runCrawlLoop(env, { seed: false, maxSteps: 40, owner }));
   },
 } satisfies ExportedHandler<Env>;
 
 function sseStream(env: Env): Response {
   let closed = false;
-  const owner = `sse-${crypto.randomUUID().slice(0, 8)}`;
-  let sinceIso = new Date(0).toISOString();
+  const geoCursor = { at: new Date(0).toISOString(), id: "" };
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -265,28 +276,19 @@ function sseStream(env: Env): Response {
       };
 
       let afterEvent = await maxEventId(writeDb(env));
-      await reclaimStaleLeases(writeDb(env));
-      send("hello", { sinceIso, afterEvent });
-      send("stats", await getStats(readDb(env)));
+      send("hello", { geoCursor, afterEvent });
+      send("stats", await getStats(writeDb(env)));
 
       while (!closed) {
         try {
-          const state = await getState(readDb(env));
-          let work: "did_work" | "idle" | "paused" = "paused";
-          if (!state.paused) {
-            work = await processOneJob(env, owner);
-            if (work === "idle") {
-              await seedFilterJob(writeDb(env), env);
-            }
-          }
-
-          const places = await listPlacesGeoSince(env, sinceIso);
+          const places = await listPlacesGeoSince(env, geoCursor);
           for (const p of places) {
-            sinceIso = p.updated_at;
+            geoCursor.at = p.updated_at;
+            geoCursor.id = p.id;
             send("place", p);
           }
 
-          const evs = await eventsSince(readDb(env), afterEvent, 30);
+          const evs = await eventsSince(readDb(env), afterEvent, 50);
           for (const e of evs) {
             afterEvent = Math.max(afterEvent, Number((e as { id: number }).id));
             const row = e as { level: string; meta_json?: string | null };
@@ -302,15 +304,13 @@ function sseStream(env: Env): Response {
             send("log", e);
           }
 
-          if (places.length || evs.length || work === "did_work") {
-            send("stats", await getStats(readDb(env)));
+          if (places.length || evs.length) {
+            send("stats", await getStats(writeDb(env)));
           } else {
             send("ping", { t: Date.now() });
           }
 
-          if (work === "idle" || work === "paused") {
-            await new Promise((r) => setTimeout(r, 400));
-          }
+          await new Promise((r) => setTimeout(r, places.length ? 100 : 500));
         } catch (err) {
           send("error", { message: err instanceof Error ? err.message : String(err) });
           await new Promise((r) => setTimeout(r, 500));

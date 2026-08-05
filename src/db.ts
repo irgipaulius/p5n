@@ -18,6 +18,9 @@ import type {
 
 const GUEST = "https://guest.park4night.com/services/V4.1";
 
+/** D1 free tier is 5 GB — stop scraping before we hit the wall. */
+export const DB_SIZE_LIMIT_BYTES = Math.floor(4.5 * 1024 * 1024 * 1024);
+
 export function nowIso(): string {
   return new Date().toISOString();
 }
@@ -117,7 +120,7 @@ export async function enqueueJob(
 
 export async function claimJob(db: D1Database, owner: string, leaseSeconds = 120): Promise<JobRow | null> {
   const state = await getState(db);
-  if (state.paused) return null;
+  if (state.paused || state.storage_handbrake) return null;
 
   const now = Date.now() / 1000;
   const row = await db
@@ -334,6 +337,9 @@ export async function ingestNewPlacesFromFilter(
   wireBytes: number,
 ): Promise<{ newCount: number; newIds: string[]; knownSeen: PlaceApi[] }> {
   const state = await getState(db);
+  if (state.storage_handbrake) {
+    return { newCount: 0, newIds: [], knownSeen: places };
+  }
   const cap = state.max_places;
   const scrapedAt = nowIso();
   let known = await placesCount(db);
@@ -366,9 +372,12 @@ export async function ingestNewPlacesFromFilter(
       name: p.name,
       updated_at: scrapedAt,
     });
-    await enqueueJob(db, "place_reviews", { place_id: p.placeId }, `reviews:${p.placeId}`, {
-      requeueIfDone: true,
-    });
+    // Defer review fetches during Europe pass — one filter response can carry 100+ places.
+    if (!state.pass_mode) {
+      await enqueueJob(db, "place_reviews", { place_id: p.placeId }, `reviews:${p.placeId}`, {
+        requeueIfDone: true,
+      });
+    }
   }
 
   const count = await placesCount(db);
@@ -458,6 +467,72 @@ export async function ingestReviews(
   return capped.filter((c) => String(c.commentaire || "").trim()).length;
 }
 
+async function estimateDbBytesFromTables(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM places) AS n_places,
+        (SELECT COUNT(*) FROM reviews) AS n_reviews,
+        (SELECT COALESCE(SUM(LENGTH(payload_json)), 0) FROM place_details) AS detail_len,
+        (SELECT COALESCE(SUM(LENGTH(comment)), 0) FROM reviews) AS comment_len`,
+    )
+    .first<{ n_places: number; n_reviews: number; detail_len: number; comment_len: number }>();
+  if (!row) return 0;
+  // ~11 KB/pin observed on slim schema (includes indexes + FTS overhead)
+  return Math.round(row.n_places * 11_000 + row.n_reviews * 320 + row.detail_len + row.comment_len);
+}
+
+export async function measureDbBytes(db: D1Database): Promise<number> {
+  try {
+    const row = await db.prepare("SELECT COALESCE(SUM(pgsize), 0) AS bytes FROM dbstat").first<{ bytes: number }>();
+    if (row?.bytes) return row.bytes;
+  } catch {
+    /* dbstat not available in D1 */
+  }
+  try {
+    const row = await db
+      .prepare(
+        `SELECT (SELECT page_count FROM pragma_page_count()) * (SELECT page_size FROM pragma_page_size()) AS bytes`,
+      )
+      .first<{ bytes: number }>();
+    if (row?.bytes) return row.bytes;
+  } catch {
+    /* pragma blocked in worker/D1 context */
+  }
+  return estimateDbBytesFromTables(db);
+}
+
+export async function checkStorageHandbrake(db: D1Database): Promise<boolean> {
+  const state = await getState(db);
+  if (state.storage_handbrake) return true;
+
+  const bytes = await measureDbBytes(db);
+  if (bytes < DB_SIZE_LIMIT_BYTES) return false;
+
+  const res = await db
+    .prepare(
+      "UPDATE crawler_state SET paused = 1, storage_handbrake = 1, updated_at = ? WHERE id = 1 AND storage_handbrake = 0",
+    )
+    .bind(nowIso())
+    .run();
+
+  if ((res.meta.changes ?? 0) > 0) {
+    await emit(
+      db,
+      `STORAGE HANDBRAKE — DB ${(bytes / (1024 * 1024)).toFixed(1)} MB ≥ ${(DB_SIZE_LIMIT_BYTES / (1024 * 1024)).toFixed(0)} MB limit. Scraper stopped; schema refactor required.`,
+      "error",
+      { db_bytes: bytes, limit_bytes: DB_SIZE_LIMIT_BYTES },
+    );
+  }
+  return true;
+}
+
+export async function advancePass(db: D1Database): Promise<void> {
+  await queueNextDiscoveryCells(db, 5);
+  await maybeCompletePass(db);
+  await checkStorageHandbrake(db);
+}
+
 export async function reviewsFetched(db: D1Database, placeId: string): Promise<boolean> {
   const row = await db
     .prepare("SELECT reviews_fetched FROM places WHERE place_id = ?")
@@ -489,11 +564,16 @@ export async function getStats(db: D1Database) {
     total: 0,
   }));
 
+  const dbBytes = await measureDbBytes(db);
+
   return {
     state,
     jobs: jobMap,
     places: known,
     reviews: reviewCount,
+    db_bytes: dbBytes,
+    db_mb: Math.round((dbBytes / (1024 * 1024)) * 100) / 100,
+    db_limit_mb: Math.round(DB_SIZE_LIMIT_BYTES / (1024 * 1024)),
     tile_manifest: tileManifest,
     pass,
   };
@@ -536,14 +616,20 @@ export async function listPlacesGeo(env: Env): Promise<PinGeo[]> {
   return (res.results ?? []).map(rowToPin);
 }
 
-export async function listPlacesGeoSince(env: Env, sinceIso: string): Promise<PinGeo[]> {
+export interface GeoCursor {
+  at: string;
+  id: string;
+}
+
+export async function listPlacesGeoSince(env: Env, cursor: GeoCursor): Promise<PinGeo[]> {
   const res = await readDb(env)
     .prepare(
       `SELECT place_id, lat, lng, type, name, updated_at FROM places
-       WHERE updated_at > ? AND lat IS NOT NULL AND lng IS NOT NULL
-       ORDER BY updated_at ASC LIMIT 200`,
+       WHERE lat IS NOT NULL AND lng IS NOT NULL
+         AND (updated_at > ? OR (updated_at = ? AND place_id > ?))
+       ORDER BY updated_at ASC, place_id ASC LIMIT 200`,
     )
-    .bind(sinceIso)
+    .bind(cursor.at, cursor.at, cursor.id)
     .all<PlaceRow>();
   return (res.results ?? []).map(rowToPin);
 }
@@ -892,12 +978,16 @@ export async function maybeCompletePass(db: D1Database): Promise<boolean> {
     .first<{ n: number }>();
   if (prog.pending === 0 && (pendingJobs?.n ?? 0) === 0) {
     await db
-      .prepare(`UPDATE crawler_state SET continuous_paused = 1, pass_mode = '', updated_at = ? WHERE id = 1`)
+      .prepare(
+        `UPDATE crawler_state SET paused = 1, continuous_paused = 1, pass_mode = '', updated_at = ? WHERE id = 1`,
+      )
       .bind(nowIso())
       .run();
     await emit(
       db,
-      `pass #${prog.pass_id} complete — ${prog.done} cells done, ${prog.error} errors. Archive intact (append-only).`,
+      `Scrape complete — pass #${prog.pass_id}: ${prog.done} cells done, ${prog.error} errors. Scraper idle.`,
+      "info",
+      { pass_id: prog.pass_id, done: prog.done, error: prog.error },
     );
     return true;
   }
@@ -934,26 +1024,88 @@ export function commentsUrl(placeId: string): string {
 
 let lastOutboundFetchAt = 0;
 
-function rateLimitMs(env: Env): number {
-  return Math.max(100, Number(env.REQUEST_DELAY_MS || 100));
+function rateLimitMs(env: Env, state?: CrawlerState): number {
+  const fromEnv = Number(env.REQUEST_DELAY_MS || 750);
+  const fromDb = state?.request_delay_ms;
+  return Math.max(750, fromDb || fromEnv);
+}
+
+/** One outbound HTTP request at a time globally, with cooldown after each completes. */
+async function withOutboundGate<T>(db: D1Database, gapMs: number, fn: () => Promise<T>): Promise<T> {
+  const maxHoldSec = 120;
+
+  for (;;) {
+    const now = Date.now() / 1000;
+    const res = await db
+      .prepare(
+        `UPDATE crawler_state SET outbound_lock_until = ?
+         WHERE id = 1 AND (outbound_lock_until IS NULL OR outbound_lock_until <= ?)`,
+      )
+      .bind(now + maxHoldSec, now)
+      .run();
+    if ((res.meta.changes ?? 0) > 0) break;
+
+    const row = await db
+      .prepare("SELECT outbound_lock_until FROM crawler_state WHERE id = 1")
+      .first<{ outbound_lock_until: number | null }>();
+    const waitMs = Math.max(0, ((row?.outbound_lock_until ?? now) - now) * 1000);
+    await new Promise((r) => setTimeout(r, Math.min(waitMs, 500)));
+  }
+
+  try {
+    return await fn();
+  } finally {
+    const done = Date.now() / 1000;
+    await db
+      .prepare("UPDATE crawler_state SET last_outbound_at = ?, outbound_lock_until = ? WHERE id = 1")
+      .bind(done, done + gapMs / 1000)
+      .run();
+    lastOutboundFetchAt = Date.now();
+  }
+}
+
+/** Only one isolate (SSE tab / cron) drives the job queue at a time. */
+export async function tryAcquireCrawlLease(db: D1Database, owner: string, leaseSec = 90): Promise<boolean> {
+  const now = Date.now() / 1000;
+  const until = now + leaseSec;
+  const res = await db
+    .prepare(
+      `UPDATE crawler_state SET crawl_lease_owner = ?, crawl_lease_until = ?, updated_at = ?
+       WHERE id = 1 AND (crawl_lease_until IS NULL OR crawl_lease_until <= ? OR crawl_lease_owner = ?)`,
+    )
+    .bind(owner, until, nowIso(), now, owner)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+function outboundGapMs(env: Env, state: CrawlerState, url: string): number {
+  const base = rateLimitMs(env, state);
+  // Filter responses carry hundreds of pins each — keep calls moving, still one at a time globally.
+  if (url.includes("lieuxGetFilter")) return base;
+  return base;
 }
 
 export async function fetchJson(env: Env, url: string): Promise<{ status: number; body: string; data: unknown }> {
-  const minGap = rateLimitMs(env);
-  const now = Date.now();
-  const wait = minGap - (now - lastOutboundFetchAt);
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastOutboundFetchAt = Date.now();
-
-  const resp = await fetch(url, {
-    headers: {
-      "User-Agent": "p5n/0.1 (cloudflare-workers; +https://github.com/irgipaulius/p5n)",
-      Accept: "application/json",
-      "Axios-Ajax": "true",
-    },
+  const db = writeDb(env);
+  const gapMs = outboundGapMs(env, await getState(db), url);
+  return withOutboundGate(db, gapMs, async () => {
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent": "p5n/0.1 (cloudflare-workers; +https://github.com/irgipaulius/p5n)",
+        Accept: "application/json",
+        "Axios-Ajax": "true",
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await resp.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      throw new Error(`invalid JSON from ${url}: ${body.slice(0, 120)}`);
+    }
+    return { status: resp.status, body, data };
   });
-  const body = await resp.text();
-  return { status: resp.status, body, data: JSON.parse(body) };
 }
 
 export function ensureEnvDefaults(env: Env): { maxPlaces: number; delayMs: number; lat: number; lng: number } {

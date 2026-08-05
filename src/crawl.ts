@@ -1,4 +1,5 @@
 import {
+  advancePass,
   claimJob,
   commentsUrl,
   emit,
@@ -15,6 +16,7 @@ import {
   refreshKnownPlace,
   resolveJob,
   slimPlace,
+  tryAcquireCrawlLease,
   writeDb,
 } from "./db";
 import type { CommentApi, Env, JobRow, PlaceApi } from "./types";
@@ -75,6 +77,7 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
       if (cellId != null && passId != null) {
         await markCellDone(db, passId, cellId, places.length);
       }
+      await advancePass(db);
     } catch (err) {
       if (cellId != null && passId != null) {
         await markCellError(db, passId, cellId, err instanceof Error ? err.message : String(err));
@@ -124,6 +127,7 @@ export async function processOneJob(env: Env, owner: string): Promise<"did_work"
   try {
     await handleJob(env, job, owner);
     await resolveJob(db, job, owner);
+    await advancePass(db);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const outcome = await resolveJob(db, job, owner, msg);
@@ -139,7 +143,7 @@ export async function processOneJob(env: Env, owner: string): Promise<"did_work"
 
 export async function runCrawlLoop(
   env: Env,
-  opts: { maxSteps?: number; seed?: boolean } = {},
+  opts: { maxSteps?: number; seed?: boolean; owner?: string } = {},
 ): Promise<{ steps: number; stopped: string }> {
   const db = writeDb(env);
   const lat = Number(env.DEFAULT_LAT || 41.688908);
@@ -148,7 +152,10 @@ export async function runCrawlLoop(
   const reclaimed = await reclaimStaleLeases(db);
   if (reclaimed) await emit(db, `reclaimed ${reclaimed} stale lease(s)`);
 
-  const owner = `worker-${crypto.randomUUID().slice(0, 8)}`;
+  const owner = opts.owner ?? `worker-${crypto.randomUUID().slice(0, 8)}`;
+  if (!(await tryAcquireCrawlLease(db, owner, 120))) {
+    return { steps: 0, stopped: "no_lease" };
+  }
   const maxSteps = opts.maxSteps ?? 200;
   const state0 = await getState(db);
 
@@ -178,8 +185,12 @@ export async function runCrawlLoop(
         "SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'",
       ).first<{ n: number }>();
       if ((pending?.n ?? 0) === 0) {
-        await emit(db, "queue empty — crawl loop stopping");
-        return { steps, stopped: "empty" };
+        await advancePass(db);
+        const state = await getState(db);
+        if (state.paused && !state.pass_mode) {
+          await emit(db, "queue empty — crawl loop stopping");
+          return { steps, stopped: "empty" };
+        }
       }
       if (idle >= 5) return { steps, stopped: "idle" };
       await sleep(200);
@@ -191,4 +202,31 @@ export async function runCrawlLoop(
 
   await emit(db, `crawl loop hit maxSteps=${maxSteps}`);
   return { steps, stopped: "max_steps" };
+}
+
+/** Background driver: one job at a time until paused, pass complete, or handbrake. */
+export async function runCrawlLoopUntilPaused(env: Env): Promise<void> {
+  const owner = `crawl-${crypto.randomUUID().slice(0, 8)}`;
+  await emit(writeDb(env), `background crawl started (${owner})`, "info");
+
+  for (;;) {
+    const db = writeDb(env);
+    const state = await getState(db);
+    if (state.paused || state.storage_handbrake) return;
+    if (!state.pass_mode && state.continuous_paused) return;
+
+    if (!(await tryAcquireCrawlLease(db, owner, 120))) {
+      await sleep(500);
+      continue;
+    }
+
+    const result = await processOneJob(env, owner);
+    if (result === "paused") return;
+    if (result === "idle") {
+      await advancePass(db);
+      const after = await getState(db);
+      if (after.paused && !after.pass_mode) return;
+      await sleep(800);
+    }
+  }
 }

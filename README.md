@@ -16,7 +16,24 @@ npm run dev               # worker API @ :8787
 npm run dev:app           # vite dashboard @ :5173 (proxies /api)
 ```
 
-Open http://localhost:5173 — click **+10 local** and watch pins appear live via SSE delta layer.
+Open http://localhost:5173 — scraper is **idle on startup**. Click **Start scrape** to begin the Europe-wide pass; **Pause** stops immediately. Stats show pin count and live DB size (MB).
+
+## Deploy (park5night.hyperreader.eu)
+
+1. **Cloudflare dashboard** → Workers & Pages → Create → Connect GitHub → select `p5n` repo.
+2. Build command: `npm run app:build` · Deploy command: `npx wrangler deploy`
+3. **D1**: `npx wrangler d1 create p5n` → paste `database_id` into `wrangler.toml` → `npm run db:remote`
+4. **R2**: create bucket `p5n-tiles`, bind as `TILES` in wrangler.toml (already configured).
+5. **Custom domain**: Workers → p5n → Settings → Domains → add `park5night.hyperreader.eu` (zone `hyperreader.eu` must be on Cloudflare).
+6. **Cron**: enabled in `wrangler.toml` (`*/1 * * * *`) so scraping continues overnight without the dashboard open.
+7. Set production vars if needed: `REQUEST_DELAY_MS=500` (polite ~2 req/s to p4n), `TILES_PUBLIC_URL=https://park5night.hyperreader.eu`.
+
+Storage safety: scraper auto-pauses at **4.5 GB** D1 usage (dashboard shows live MB). If hit, schema is too thick — refactor before resuming.
+
+```bash
+npm run app:build
+npm run deploy
+```
 
 ### Bake pin tiles (after crawling)
 
@@ -136,6 +153,8 @@ Versioned `pins-v{N}.pmtiles` with `Cache-Control: immutable` — repeat visits 
 ---
 
 ## Deploy
+
+See **Deploy (park5night.hyperreader.eu)** in Quick start above.
 
 ```bash
 npm run app:build

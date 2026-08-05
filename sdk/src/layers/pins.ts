@@ -99,12 +99,15 @@ export function addDeltaPinLayers(map: maplibregl.Map, sourceId = "pins-delta"):
   addGeoJsonPinLayers(map, sourceId);
 }
 
+export function deltaLayerIds(deltaId = "pins-delta"): string[] {
+  return [`${deltaId}-circles`, `${deltaId}-symbols`];
+}
+
 export function baseLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): string[] {
   return [
     `${sourceId}-circles`,
     `${sourceId}-symbols`,
-    `${deltaId}-circles`,
-    `${deltaId}-symbols`,
+    ...deltaLayerIds(deltaId),
   ];
 }
 

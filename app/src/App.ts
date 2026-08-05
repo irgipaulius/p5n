@@ -327,20 +327,41 @@ export function mountApp(root: HTMLElement): void {
 
   async function refreshStats(): Promise<void> {
     const resp = await fetch(`${API_BASE}/api/stats`);
-    applyStats(await resp.json());
+    const data = await resp.json();
+    if (!resp.ok || (data as { error?: string }).error) return;
+    applyStats(data);
   }
 
   function applyStats(stats: unknown): void {
     const s = stats as {
       places?: number;
+      db_mb?: number;
+      db_limit_mb?: number;
       jobs?: Record<string, number>;
-      state?: { paused: number; max_places: number };
+      state?: { paused: number; storage_handbrake?: number; max_places: number };
+      pass?: { done: number; total: number; pending: number };
     };
-    scraping = !s.state?.paused;
-    statsEl.innerHTML = `<span>${s.places ?? 0} places</span><span>${s.jobs?.pending ?? 0} queue</span>`;
+    scraping = s.state?.paused === 0;
+    const dbMb = s.db_mb ?? 0;
+    const limitMb = s.db_limit_mb ?? 4608;
+    const dbClass = dbMb >= limitMb * 0.85 ? "stats-warn" : "";
+    const passLine =
+      s.pass?.total && s.pass.total > 0
+        ? `<span>${s.pass.done}/${s.pass.total} cells</span>`
+        : "";
+    statsEl.innerHTML = `<span>${s.places ?? 0} pins</span><span class="${dbClass}">${dbMb.toFixed(1)} MB</span><span>${s.jobs?.pending ?? 0} queue</span>${passLine}`;
     btnToggle.textContent = scraping ? "Pause" : "Resume";
     btnToggle.classList.toggle("btn-accent", !scraping);
-    btnStart.disabled = scraping;
+    btnStart.disabled = scraping || !!s.state?.storage_handbrake;
+    if (s.state?.storage_handbrake) {
+      statusEl.textContent = "storage full";
+      statusEl.classList.add("status-error");
+    } else {
+      statusEl.classList.remove("status-error");
+      if (scraping) statusEl.textContent = "scraping";
+      else if (s.pass?.total && s.pass.done === s.pass.total && !s.pass.pending) statusEl.textContent = "complete";
+      else statusEl.textContent = "idle";
+    }
   }
 
   btnStart.addEventListener("click", () => {
@@ -364,15 +385,20 @@ export function mountApp(root: HTMLElement): void {
     if (e.level === "pin") return;
     const line = document.createElement("div");
     line.textContent = `${e.created_at.slice(11, 19)} ${e.message}`;
+    if (e.level === "error") line.className = "log-error";
     logEl.prepend(line);
-    while (logEl.childElementCount > 20) logEl.lastElementChild?.remove();
+    while (logEl.childElementCount > 30) logEl.lastElementChild?.remove();
   });
   es.addEventListener("place", (ev) => {
     const pin = JSON.parse((ev as MessageEvent).data) as PinFeature;
     p5n.addLivePin(pin);
     statusEl.textContent = `+ ${pin.name ?? pin.id}`;
   });
-  es.addEventListener("stats", (ev) => applyStats(JSON.parse((ev as MessageEvent).data)));
+  es.addEventListener("stats", (ev) => {
+    const data = JSON.parse((ev as MessageEvent).data);
+    if (!(data as { state?: unknown }).state) return;
+    applyStats(data);
+  });
   es.addEventListener("hello", () => refreshStats());
 }
 

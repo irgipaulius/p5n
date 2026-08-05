@@ -7,6 +7,7 @@ export interface Env {
   DEFAULT_LAT: string;
   DEFAULT_LNG: string;
   TILES_PUBLIC_URL?: string;
+  USE_D1_SESSIONS?: string;
 }
 
 /** Job kinds — claim order prefers discovery over refresh/reviews. */
@@ -37,6 +38,11 @@ export interface CrawlerState {
   continuous_paused: number;
   pass_id: number;
   pass_mode: string;
+  storage_handbrake: number;
+  last_outbound_at: number | null;
+  outbound_lock_until: number | null;
+  crawl_lease_owner: string | null;
+  crawl_lease_until: number | null;
   updated_at: string;
 }
 

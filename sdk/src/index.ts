@@ -2,7 +2,7 @@ import type maplibregl from "maplibre-gl";
 import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
-import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, filteredLayerIds, setLayerVisibility, setTypeFilter } from "./layers/pins";
+import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setTypeFilter } from "./layers/pins";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -90,12 +90,19 @@ export class P5nMap {
   }
 
   private applyVisibilityState(): void {
-    setLayerVisibility(this.map, baseLayerIds(this.pinsSourceId, this.deltaSourceId), !this.filterMode);
+    const bakedIds = [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`];
+    setLayerVisibility(this.map, bakedIds, !this.filterMode);
+    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), true);
     setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
     if (this.activeTypeFilter && !this.filterMode) {
       this.filterTypes(this.activeTypeFilter);
     } else if (this.activeTypeFilter && this.filterMode) {
       setTypeFilter(this.map, this.activeTypeFilter, filteredLayerIds(this.filteredSourceId));
+    } else if (this.activeTypeFilter) {
+      setTypeFilter(this.map, this.activeTypeFilter, [
+        ...deltaLayerIds(this.deltaSourceId),
+        ...filteredLayerIds(this.filteredSourceId),
+      ]);
     }
   }
 
