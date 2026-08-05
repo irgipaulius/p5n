@@ -44,17 +44,16 @@ export default {
     const { pathname } = url;
 
     try {
-      // Static app assets (built dashboard)
-      if (request.method === "GET" && pathname.startsWith("/app/")) {
-        if (env.ASSETS) return env.ASSETS.fetch(request);
-        return serveAppAsset(pathname);
+      // Static app assets (built dashboard at app/dist root)
+      if (env.ASSETS && (pathname.startsWith("/assets/") || pathname === "/sw.js" || pathname === "/manifest.webmanifest")) {
+        return env.ASSETS.fetch(request);
       }
 
       if (request.method === "GET" && (pathname === "/" || pathname === "/dashboard")) {
         if (env.ASSETS) {
-          const url = new URL(request.url);
-          url.pathname = "/app/index.html";
-          return env.ASSETS.fetch(new Request(url, request));
+          const assetUrl = new URL(request.url);
+          assetUrl.pathname = "/index.html";
+          return env.ASSETS.fetch(new Request(assetUrl, request));
         }
         return serveAppIndex();
       }
@@ -354,8 +353,8 @@ function serveAppIndex(): Response {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>p5n dashboard</title>
-  <script type="module" crossorigin src="/app/assets/index.js"></script>
-  <link rel="stylesheet" crossorigin href="/app/assets/index.css">
+  <script type="module" crossorigin src="/assets/index.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index.css">
 </head>
 <body>
   <div id="root"></div>

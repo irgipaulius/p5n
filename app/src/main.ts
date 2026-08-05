@@ -3,7 +3,7 @@ import "./styles.css";
 import { mountApp } from "./App";
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  navigator.serviceWorker.register("/app/sw.js").catch(() => {});
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
 }
 
 mountApp(document.getElementById("app")!);

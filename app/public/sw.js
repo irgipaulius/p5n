@@ -1,5 +1,5 @@
 const CACHE = "p5n-shell-v1";
-const SHELL = ["/app/", "/app/assets/index.js", "/app/assets/index.css"];
+const SHELL = ["/", "/assets/index.js", "/assets/index.css"];
 
 self.addEventListener("install", (ev) => {
   ev.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -15,7 +15,7 @@ self.addEventListener("activate", (ev) => {
 
 self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
-  if (url.pathname.startsWith("/app/") && !url.pathname.includes("/api")) {
+  if ((url.pathname === "/" || url.pathname.startsWith("/assets/")) && !url.pathname.includes("/api")) {
     ev.respondWith(
       caches.match(ev.request).then((cached) => cached ?? fetch(ev.request)),
     );

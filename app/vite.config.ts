@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 export default defineConfig({
   root: ".",
-  base: "/app/",
+  base: "/",
   resolve: {
     alias: {
       "@p5n/sdk": resolve(__dirname, "../sdk/src/index.ts"),
