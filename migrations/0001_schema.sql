@@ -2,7 +2,7 @@
 
 CREATE TABLE crawler_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  paused INTEGER NOT NULL DEFAULT 0,
+  paused INTEGER NOT NULL DEFAULT 1,
   max_places INTEGER NOT NULL DEFAULT 10,
   places_crawled INTEGER NOT NULL DEFAULT 0,
   request_delay_ms INTEGER NOT NULL DEFAULT 300,
@@ -16,7 +16,7 @@ CREATE TABLE crawler_state (
 INSERT INTO crawler_state (
   id, paused, max_places, places_crawled, request_delay_ms,
   prefer_new, continuous_paused, pass_id, pass_mode, updated_at
-) VALUES (1, 0, 10, 0, 300, 1, 1, 0, '', datetime('now'));
+) VALUES (1, 1, 10, 0, 300, 1, 1, 0, '', datetime('now'));
 
 -- Read-optimized current place row (one per place_id)
 CREATE TABLE places (

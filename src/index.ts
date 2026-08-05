@@ -7,6 +7,7 @@ import {
   eventsSince,
   fetchJson,
   getPlaceFull,
+  getState,
   getStats,
   ingestReviews,
   listPlaces,
@@ -208,7 +209,9 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runCrawlLoop(env, { seed: true, maxSteps: 20 }));
+    const state = await getState(writeDb(env));
+    if (state.paused) return;
+    ctx.waitUntil(runCrawlLoop(env, { seed: false, maxSteps: 20 }));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -236,9 +239,13 @@ function sseStream(env: Env): Response {
 
       while (!closed) {
         try {
-          await queueNextDiscoveryCells(writeDb(env), 3);
-          const work = await processOneJob(env, owner);
-          await maybeCompletePass(writeDb(env));
+          const state = await getState(readDb(env));
+          let work: "did_work" | "idle" | "paused" = "paused";
+          if (!state.paused) {
+            await queueNextDiscoveryCells(writeDb(env), 3);
+            work = await processOneJob(env, owner);
+            await maybeCompletePass(writeDb(env));
+          }
 
           const places = await listPlacesGeoSince(env, sinceIso);
           for (const p of places) {

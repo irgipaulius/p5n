@@ -146,7 +146,7 @@ export async function runCrawlLoop(
   const maxSteps = opts.maxSteps ?? 200;
   const state0 = await getState(db);
 
-  if (opts.seed !== false) {
+  if (opts.seed === true) {
     const known = await placesCount(db);
     const pending = await db.prepare(
       "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')",

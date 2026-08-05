@@ -26,5 +26,6 @@ directory = "./app/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
-[triggers]
-crons = ["*/2 * * * *"]
+# Cron disabled by default — enable when you want unattended crawling (costs bandwidth).
+# [triggers]
+# crons = ["*/2 * * * *"]
