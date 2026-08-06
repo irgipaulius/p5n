@@ -96,7 +96,7 @@ export class P5nMap {
   private applyVisibilityState(): void {
     const bakedIds = [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`];
     setLayerVisibility(this.map, bakedIds, !this.filterMode);
-    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), true);
+    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), !this.filterMode);
     setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
     if (this.activeTypeFilter && !this.filterMode) {
       this.filterTypes(this.activeTypeFilter);
@@ -160,6 +160,7 @@ export class P5nMap {
   }
 
   addLivePinIfVisible(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): boolean {
+    if (this.filterMode) return false;
     if (!this.isPinInView(pin)) return false;
     this.addLivePin(pin);
     return true;

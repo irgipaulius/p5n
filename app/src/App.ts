@@ -341,7 +341,7 @@ export function mountApp(root: HTMLElement): void {
 
     const results: PinFeature[] = [];
     searchMeta.textContent = "searching…";
-    p5n.clearFilteredPins();
+    p5n.showFilteredPins([]);
 
     try {
       await p5n.search({
