@@ -90,7 +90,7 @@ function carouselHtml(photos: PlacePhoto[]): string {
   const slides = photos
     .map(
       (p, i) =>
-        `<a href="${escapeHtml(p.large)}" class="carousel-slide${i === 0 ? " active" : ""}" data-i="${i}" data-pswp-width="1920" data-pswp-height="1280" target="_blank" rel="noopener">
+        `<a href="${escapeHtml(p.large)}" class="carousel-slide${i === 0 ? " active" : ""}" data-i="${i}">
           <img src="${escapeHtml(p.large)}" alt="" loading="${i === 0 ? "eager" : "lazy"}" />
         </a>`,
     )
@@ -215,23 +215,114 @@ export function initPlaceDetailPanel(root: HTMLElement): void {
     { passive: true },
   );
 
-  initPhotoLightbox(carousel as HTMLElement);
+  void initPhotoLightbox(carousel as HTMLElement, slides);
 }
 
 let activeLightbox: PhotoSwipeLightbox | null = null;
+const dimensionCache = new Map<string, { w: number; h: number }>();
 
-function initPhotoLightbox(gallery: HTMLElement): void {
+function slideDimensionsFromImg(img: HTMLImageElement): { w: number; h: number } | null {
+  if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+    return { w: img.naturalWidth, h: img.naturalHeight };
+  }
+  return null;
+}
+
+function cacheSlideDimensions(anchor: HTMLAnchorElement, w: number, h: number): void {
+  anchor.dataset.pswpWidth = String(w);
+  anchor.dataset.pswpHeight = String(h);
+  if (anchor.href) dimensionCache.set(anchor.href, { w, h });
+}
+
+function probeImageDimensions(src: string): Promise<{ w: number; h: number } | null> {
+  const cached = dimensionCache.get(src);
+  if (cached) return Promise.resolve(cached);
+
+  return new Promise((resolve) => {
+    const probe = new Image();
+    probe.onload = () => {
+      if (probe.naturalWidth > 0 && probe.naturalHeight > 0) {
+        const dims = { w: probe.naturalWidth, h: probe.naturalHeight };
+        dimensionCache.set(src, dims);
+        resolve(dims);
+      } else {
+        resolve(null);
+      }
+    };
+    probe.onerror = () => resolve(null);
+    probe.src = src;
+  });
+}
+
+async function ensureGalleryDimensions(slides: HTMLElement[]): Promise<void> {
+  await Promise.all(
+    slides.map(async (slide) => {
+      const anchor = slide as HTMLAnchorElement;
+      const img = anchor.querySelector("img");
+      const fromImg = img ? slideDimensionsFromImg(img) : null;
+      if (fromImg) {
+        cacheSlideDimensions(anchor, fromImg.w, fromImg.h);
+        return;
+      }
+      const probed = await probeImageDimensions(anchor.href);
+      if (probed) cacheSlideDimensions(anchor, probed.w, probed.h);
+      if (img) {
+        img.addEventListener(
+          "load",
+          () => {
+            const loaded = slideDimensionsFromImg(img);
+            if (loaded) cacheSlideDimensions(anchor, loaded.w, loaded.h);
+          },
+          { once: true },
+        );
+      }
+    }),
+  );
+}
+
+async function initPhotoLightbox(gallery: HTMLElement, slides: HTMLElement[]): Promise<void> {
   activeLightbox?.destroy();
+  await ensureGalleryDimensions(slides);
   activeLightbox = new PhotoSwipeLightbox({
     gallery,
     children: "a.carousel-slide",
     pswpModule: () => import("photoswipe"),
     showHideAnimationType: "zoom",
+    initialZoomLevel: "fit",
+    secondaryZoomLevel: 2,
+    maxZoomLevel: 4,
     bgOpacity: 0.92,
     wheelToZoom: true,
     pinchToClose: true,
     closeOnVerticalDrag: true,
     padding: { top: 20, bottom: 40, left: 20, right: 20 },
+  });
+  activeLightbox.addFilter("domItemData", (itemData, _element, linkEl) => {
+    const w = linkEl.dataset.pswpWidth ? Number(linkEl.dataset.pswpWidth) : 0;
+    const h = linkEl.dataset.pswpHeight ? Number(linkEl.dataset.pswpHeight) : 0;
+    const img = linkEl.querySelector("img");
+    const fromImg = img ? slideDimensionsFromImg(img) : null;
+    const width = fromImg?.w || w;
+    const height = fromImg?.h || h;
+    if (width > 0 && height > 0) {
+      itemData.width = width;
+      itemData.height = height;
+      itemData.w = width;
+      itemData.h = height;
+    }
+    return itemData;
+  });
+  activeLightbox.addFilter("itemData", (itemData, _index) => {
+    if ((!itemData.width || !itemData.height) && itemData.src) {
+      const cached = dimensionCache.get(itemData.src);
+      if (cached) {
+        itemData.width = cached.w;
+        itemData.height = cached.h;
+        itemData.w = cached.w;
+        itemData.h = cached.h;
+      }
+    }
+    return itemData;
   });
   activeLightbox.on("uiRegister", () => {
     activeLightbox?.pswp?.ui?.registerElement({
