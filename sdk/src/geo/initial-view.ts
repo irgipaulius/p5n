@@ -4,7 +4,14 @@ export interface InitialView {
   lat: number;
   lng: number;
   zoom: number;
-  source: "gps" | "ip" | "default";
+  source: "gps" | "ip" | "default" | "place";
+}
+
+export interface InitialViewOptions {
+  /** Skip browser geolocation prompt (e.g. shared place link). */
+  skipGeolocation?: boolean;
+  /** Jump straight to these coords instead of IP/GPS. */
+  center?: { lat: number; lng: number; zoom?: number };
 }
 
 const DEFAULT: InitialView = { lat: 50, lng: 10, zoom: 5, source: "default" };
@@ -40,9 +47,27 @@ function requestGps(): Promise<{ lat: number; lng: number } | null> {
 }
 
 /** Rough IP center first, then browser location prompt; returns final view used. */
-export async function resolveInitialView(map: maplibregl.Map, apiBase: string): Promise<InitialView> {
+export async function resolveInitialView(
+  map: maplibregl.Map,
+  apiBase: string,
+  opts: InitialViewOptions = {},
+): Promise<InitialView> {
+  if (opts.center) {
+    const zoom = opts.center.zoom ?? 14;
+    const view: InitialView = {
+      lat: opts.center.lat,
+      lng: opts.center.lng,
+      zoom,
+      source: "place",
+    };
+    map.jumpTo({ center: [view.lng, view.lat], zoom: view.zoom });
+    return view;
+  }
+
   const ipView = (await fetchIpView(apiBase)) ?? DEFAULT;
   map.jumpTo({ center: [ipView.lng, ipView.lat], zoom: ipView.zoom });
+
+  if (opts.skipGeolocation) return ipView;
 
   const gps = await requestGps();
   if (gps) {

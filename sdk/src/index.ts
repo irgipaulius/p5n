@@ -2,7 +2,7 @@ import type maplibregl from "maplibre-gl";
 import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
-import { resolveInitialView, type InitialView } from "./geo/initial-view";
+import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
 import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setSelectedPinFeature, setTypeFilter } from "./layers/pins";
 import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins } from "./pins/viewport-pins";
 import { registerPinIcons } from "./icons/pin-icons";
@@ -133,8 +133,8 @@ export class P5nMap {
   }
 
   /** IP geolocation first, then browser location prompt; centers the map. */
-  async resolveInitialView(): Promise<InitialView> {
-    return resolveInitialView(this.map, this.config.apiBase);
+  async resolveInitialView(opts?: InitialViewOptions): Promise<InitialView> {
+    return resolveInitialView(this.map, this.config.apiBase, opts);
   }
 
   isPinInView(pin: { lat: number; lng: number }): boolean {

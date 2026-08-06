@@ -56,6 +56,46 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+export const SHARE_ORIGIN = "https://park5night.hyperreader.eu";
+
+export function placeShareUrl(placeId: string): string {
+  return `${SHARE_ORIGIN}/${encodeURIComponent(placeId)}`;
+}
+
+export function parsePlaceIdFromPath(pathname = location.pathname): string | null {
+  const m = pathname.match(/^\/(\d+)\/?$/);
+  return m?.[1] ?? null;
+}
+
+function googleMapsUrl(lat: number, lng: number): string {
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+}
+
+function wazeUrl(lat: number, lng: number): string {
+  return `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+}
+
+function detailActionsHtml(data: PlaceDetail): string {
+  if (data.lat == null || data.lng == null) return "";
+  const lat = data.lat;
+  const lng = data.lng;
+  return `<div class="detail-actions">
+    <button type="button" class="detail-action" id="btn-share-place" title="Copy link">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
+      <span>Share</span>
+    </button>
+    <a class="detail-action" id="btn-gmaps" href="${escapeHtml(googleMapsUrl(lat, lng))}" target="_blank" rel="noopener noreferrer">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6a2.5 2.5 0 0 1 0 5.5z"/></svg>
+      <span>Google Maps</span>
+    </a>
+    <a class="detail-action" id="btn-waze" href="${escapeHtml(wazeUrl(lat, lng))}" target="_blank" rel="noopener noreferrer">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6a2.5 2.5 0 0 1 0 5.5z"/></svg>
+      <span>Waze</span>
+    </a>
+    <span class="detail-action-toast" id="share-toast" hidden>Link copied</span>
+  </div>`;
+}
+
 function activeFacilities(data: PlaceDetail, defs: AttributeDef[]): AttributeDef[] {
   const a0 = data.attrs0 ?? 0;
   const a1 = data.attrs1 ?? 0;
@@ -128,6 +168,7 @@ export function renderPlaceDetail(data: PlaceDetail, defs: AttributeDef[], typeI
     </div>
     <button class="btn-icon" id="btn-close-detail">✕</button>
   </header>
+  ${detailActionsHtml(data)}
   <div class="detail-body">
     <div class="detail-hero">${starsHtml(data.rating)}</div>
     <div class="fact-grid">
@@ -169,7 +210,9 @@ export function renderPlaceDetail(data: PlaceDetail, defs: AttributeDef[], typeI
   return html;
 }
 
-export function initPlaceDetailPanel(root: HTMLElement): void {
+export function initPlaceDetailPanel(root: HTMLElement, data?: PlaceDetail): void {
+  if (data) initDetailActions(root, data);
+
   const carousel = root.querySelector(".photo-carousel");
   if (!carousel) return;
   const slides = [...carousel.querySelectorAll<HTMLElement>(".carousel-slide")];
@@ -216,6 +259,34 @@ export function initPlaceDetailPanel(root: HTMLElement): void {
   );
 
   void initPhotoLightbox(carousel as HTMLElement, slides);
+}
+
+function initDetailActions(root: HTMLElement, data: PlaceDetail): void {
+  const shareBtn = root.querySelector<HTMLButtonElement>("#btn-share-place");
+  const toast = root.querySelector<HTMLElement>("#share-toast");
+  shareBtn?.addEventListener("click", () => {
+    void (async () => {
+      const url = placeShareUrl(data.place_id);
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      if (toast) {
+        toast.hidden = false;
+        window.setTimeout(() => {
+          toast.hidden = true;
+        }, 2000);
+      }
+    })();
+  });
 }
 
 let activeLightbox: PhotoSwipeLightbox | null = null;

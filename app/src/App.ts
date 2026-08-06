@@ -1,7 +1,7 @@
 import { P5nMap, TYPE_LABELS, attrIcon, typeIconSvg, typeToInt, type PinFeature } from "@p5n/sdk";
 import maplibregl from "maplibre-gl";
 import { installDrawerSwipe } from "./drawer-swipe";
-import { initPlaceDetailPanel, loadPlaceDetail, renderPlaceDetail } from "./place-detail";
+import { initPlaceDetailPanel, loadPlaceDetail, parsePlaceIdFromPath, renderPlaceDetail } from "./place-detail";
 
 const API_BASE = import.meta.env.DEV ? "" : "";
 
@@ -110,48 +110,107 @@ export function mountApp(root: HTMLElement): void {
   let attributes: AttributeDef[] = [];
   const selectedTypes = new Set(Object.keys(TYPE_LABELS).map(Number));
   const selectedAttrs = new Set<string>();
+  const deepPlaceId = parsePlaceIdFromPath();
 
   void (async () => {
     await p5n.whenReady();
     await p5n.tryOfflineFirst();
     await p5n.initTilesFromManifest();
     p5n.watchSystemTheme();
-    const view = await p5n.resolveInitialView();
+
+    let deepCenter: { lat: number; lng: number; zoom: number } | undefined;
+    if (deepPlaceId) {
+      try {
+        const data = await loadPlaceDetail(API_BASE, deepPlaceId, false);
+        if (data.lat != null && data.lng != null) {
+          deepCenter = { lat: data.lat, lng: data.lng, zoom: 14 };
+        }
+      } catch {
+        /* openPlaceById will show the error */
+      }
+    }
+
+    const view = await p5n.resolveInitialView(
+      deepCenter
+        ? { center: deepCenter }
+        : deepPlaceId
+          ? { skipGeolocation: true }
+          : undefined,
+    );
     p5n.onMoveEndLoadPins();
     p5n.onMoveEndEnrich();
     const n = await p5n.loadViewportPins();
-    statusEl.textContent = n ? `${n} pins nearby` : view.source === "gps" ? "ready" : "ready — pan to explore";
+    statusEl.textContent = n
+      ? `${n} pins nearby`
+      : view.source === "place"
+        ? "shared place"
+        : view.source === "gps"
+          ? "ready"
+          : "ready — pan to explore";
     p5n.filterTypes([...selectedTypes]);
     await refreshStats();
     await loadAttributes();
     buildTypeFilters();
     buildAttrFilters();
+
+    if (deepPlaceId) {
+      await openPlaceById(deepPlaceId, { updateUrl: false, flyTo: !deepCenter });
+    }
   })();
 
-  p5n.onPinClick(async (pin) => {
-    p5n.selectPin(pin);
+  async function openPlaceById(
+    placeId: string,
+    opts: { pin?: { id: string; lat: number; lng: number; t: number }; updateUrl?: boolean; flyTo?: boolean } = {},
+  ): Promise<void> {
+    const updateUrl = opts.updateUrl !== false;
+    if (updateUrl && parsePlaceIdFromPath() !== placeId) {
+      history.pushState({ placeId }, "", `/${placeId}`);
+    }
+
+    if (opts.pin) p5n.selectPin(opts.pin);
     detailEl.classList.add("open");
     detailEl.innerHTML = `<header class="detail-head"><h2>Loading…</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">Fetching place…</p>`;
     detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
+
     try {
-      const data = await loadPlaceDetail(API_BASE, pin.id, true);
-      if (data.lat != null && data.lng != null) {
-        p5n.selectPin({ id: pin.id, lat: data.lat, lng: data.lng, t: pin.t });
-      }
+      const data = await loadPlaceDetail(API_BASE, placeId, true);
       const typeInt = typeToInt(String(data.type || "P"));
+      if (data.lat != null && data.lng != null) {
+        p5n.selectPin({ id: placeId, lat: data.lat, lng: data.lng, t: typeInt });
+        if (opts.flyTo !== false) {
+          p5n.map.flyTo({ center: [data.lng, data.lat], zoom: 14, duration: 700 });
+        }
+      }
       detailEl.innerHTML = renderPlaceDetail(data, attributes, typeInt);
-      initPlaceDetailPanel(detailEl);
+      initPlaceDetailPanel(detailEl, data);
       detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
     } catch (err) {
       detailEl.innerHTML = `<header class="detail-head"><h2>Error</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">${escapeHtml(String(err))}</p>`;
       detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
     }
+  }
+
+  p5n.onPinClick(async (pin) => {
+    await openPlaceById(pin.id, { pin });
   });
 
   function closeDetail(): void {
     detailEl.classList.remove("open");
     p5n.selectPin(null);
+    if (parsePlaceIdFromPath()) {
+      history.pushState(null, "", "/");
+    }
   }
+
+  window.addEventListener("popstate", () => {
+    const id = parsePlaceIdFromPath();
+    if (id) {
+      void openPlaceById(id, { updateUrl: false });
+      return;
+    }
+    detailEl.classList.remove("open");
+    p5n.selectPin(null);
+  });
 
   async function loadAttributes(): Promise<void> {
     const resp = await fetch(`${API_BASE}/api/attributes`);
