@@ -38,8 +38,10 @@ export function mountApp(root: HTMLElement): void {
         <div class="float float-scrape glass">
           <button type="button" id="btn-start" class="btn btn-accent">Start scrape</button>
           <button type="button" id="btn-toggle" class="btn">Pause</button>
+          <button type="button" id="btn-bake" class="btn" title="Export D1 → PMTiles on R2">Bake tiles</button>
           <div class="stats" id="stats">…</div>
           <span class="status" id="status"></span>
+          <span class="bake-status" id="bake-status"></span>
         </div>
         <div class="float float-log glass" id="log"></div>
       </div>
@@ -102,6 +104,8 @@ export function mountApp(root: HTMLElement): void {
   const searchMeta = root.querySelector("#search-meta") as HTMLElement;
   const btnStart = root.querySelector("#btn-start") as HTMLButtonElement;
   const btnToggle = root.querySelector("#btn-toggle") as HTMLButtonElement;
+  const btnBake = root.querySelector("#btn-bake") as HTMLButtonElement;
+  const bakeStatusEl = root.querySelector("#bake-status") as HTMLElement;
   const drawer = root.querySelector("#drawer") as HTMLElement;
   const btnFilters = root.querySelector("#btn-filters") as HTMLButtonElement;
   const typeFiltersEl = root.querySelector("#type-filters") as HTMLElement;
@@ -126,6 +130,8 @@ export function mountApp(root: HTMLElement): void {
   p5n.map.addControl(new maplibregl.ScaleControl(), "bottom-left");
 
   let scraping = false;
+  let baking = false;
+  let bakePollTimer: number | undefined;
   let attributes: AttributeDef[] = [];
   const selectedTypes = new Set(Object.keys(TYPE_LABELS).map(Number));
   const selectedAttrs = new Set<string>();
@@ -158,17 +164,24 @@ export function mountApp(root: HTMLElement): void {
     );
     p5n.onMoveEndLoadPins();
     p5n.onMoveEndEnrich();
-    p5n.map.on("moveend", () => scheduleViewportSearch(450));
-    const n = await p5n.loadViewportPins();
-    statusEl.textContent = n
-      ? `${n} pins nearby`
-      : view.source === "place"
-        ? "shared place"
-        : view.source === "gps"
-          ? "ready"
-          : "ready — pan to explore";
+    p5n.map.on("moveend", () => {
+      scheduleViewportSearch(450);
+      const hint = p5n.pinZoomHint();
+      if (hint && !hasAdvancedFilters()) searchMeta.textContent = hint;
+    });
+    const n = p5n.hasBakedTiles() ? 0 : await p5n.loadViewportPins();
+    statusEl.textContent = p5n.hasBakedTiles()
+      ? "baked tiles"
+      : n
+        ? `${n} pins nearby`
+        : view.source === "place"
+          ? "shared place"
+          : view.source === "gps"
+            ? "ready"
+            : "ready — pan to explore";
     p5n.filterTypes([...selectedTypes]);
     await refreshStats();
+    if (baking) startBakePoll();
     await loadAttributes();
     buildTypeFilters();
     buildAttrFilters();
@@ -487,6 +500,16 @@ export function mountApp(root: HTMLElement): void {
       jobs?: Record<string, number>;
       state?: { paused: number; storage_handbrake?: number; max_places: number };
       pass?: { done: number; total: number; pending: number };
+      tile_manifest?: {
+        version?: number;
+        place_count?: number;
+        bytes?: number;
+        built_at?: string | null;
+        bake_status?: string;
+        bake_progress?: number;
+        bake_total?: number;
+        bake_error?: string | null;
+      };
     };
     scraping = s.state?.paused === 0;
     const dbMb = s.db_mb ?? 0;
@@ -496,19 +519,96 @@ export function mountApp(root: HTMLElement): void {
       s.pass?.total && s.pass.total > 0
         ? `<span>${s.pass.done}/${s.pass.total} cells</span>`
         : "";
-    statsEl.innerHTML = `<span>${s.places ?? 0} pins</span><span class="${dbClass}">${dbMb.toFixed(1)} MB</span><span>${s.jobs?.pending ?? 0} queue</span>${passLine}`;
+    const tm = s.tile_manifest;
+    const bakedMb = tm?.bytes ? (tm.bytes / (1024 * 1024)).toFixed(1) : null;
+    const bakedLine =
+      tm?.version && tm.version > 0
+        ? `<span class="stats-baked" title="PMTiles v${tm.version}">${tm.place_count ?? 0} baked${bakedMb ? ` · ${bakedMb} MB` : ""}</span>`
+        : "";
+    statsEl.innerHTML = `<span>${s.places ?? 0} pins</span><span class="${dbClass}">${dbMb.toFixed(1)} MB</span><span>${s.jobs?.pending ?? 0} queue</span>${passLine}${bakedLine}`;
     btnToggle.textContent = scraping ? "Pause" : "Resume";
     btnToggle.classList.toggle("btn-accent", !scraping);
     btnStart.disabled = scraping || !!s.state?.storage_handbrake;
+    applyBakeUi(tm);
     if (s.state?.storage_handbrake) {
       statusEl.textContent = "storage full";
       statusEl.classList.add("status-error");
-    } else {
+    } else if (!baking) {
       statusEl.classList.remove("status-error");
       if (scraping) statusEl.textContent = "scraping";
       else if (s.pass?.total && s.pass.done === s.pass.total && !s.pass.pending) statusEl.textContent = "complete";
-      else statusEl.textContent = "idle";
+      else if (!p5n.hasBakedTiles()) statusEl.textContent = "idle";
     }
+  }
+
+  let wasBaking = false;
+
+  function applyBakeUi(tm?: {
+    bake_status?: string;
+    bake_progress?: number;
+    bake_total?: number;
+    bake_error?: string | null;
+    version?: number;
+    place_count?: number;
+    bytes?: number;
+  }): void {
+    const status = tm?.bake_status ?? "idle";
+    baking = status === "running";
+    btnBake.disabled = baking;
+
+    if (status === "running") {
+      wasBaking = true;
+      const done = tm?.bake_progress ?? 0;
+      const total = tm?.bake_total ?? 0;
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+      const phase = total > 0 && done >= total ? "tiling…" : "exporting…";
+      bakeStatusEl.textContent = `baking ${phase} ${done.toLocaleString()}${total ? ` / ${total.toLocaleString()} (${pct}%)` : ""}`;
+      bakeStatusEl.className = "bake-status baking";
+      statusEl.textContent = "baking tiles…";
+      return;
+    }
+
+    if (status === "error") {
+      bakeStatusEl.textContent = tm?.bake_error ? `bake failed: ${tm.bake_error}` : "bake failed";
+      bakeStatusEl.className = "bake-status bake-error";
+      stopBakePoll();
+      wasBaking = false;
+      btnBake.disabled = false;
+      return;
+    }
+
+    if (wasBaking && status !== "running") {
+      wasBaking = false;
+      stopBakePoll();
+      void onBakeComplete();
+    }
+
+    btnBake.disabled = false;
+    bakeStatusEl.className = "bake-status";
+    if (tm?.version && tm.version > 0) {
+      const mb = tm.bytes ? (tm.bytes / (1024 * 1024)).toFixed(1) : "?";
+      bakeStatusEl.textContent = `PMTiles v${tm.version} · ${(tm.place_count ?? 0).toLocaleString()} pins · ${mb} MB`;
+    } else {
+      bakeStatusEl.textContent = "";
+    }
+  }
+
+  function stopBakePoll(): void {
+    if (bakePollTimer) window.clearInterval(bakePollTimer);
+    bakePollTimer = undefined;
+  }
+
+  function startBakePoll(): void {
+    stopBakePoll();
+    bakePollTimer = window.setInterval(() => void refreshStats(), 1500);
+  }
+
+  async function onBakeComplete(): Promise<void> {
+    baking = false;
+    stopBakePoll();
+    const loaded = await p5n.reloadBakedTiles();
+    statusEl.textContent = loaded ? "baked tiles loaded" : "bake done — reload page";
+    await refreshStats();
   }
 
   btnStart.addEventListener("click", () => {
@@ -524,6 +624,29 @@ export function mountApp(root: HTMLElement): void {
       statusEl.textContent = scraping ? "scraping" : "paused";
       if (!scraping) btnStart.disabled = false;
     });
+  });
+
+  btnBake.addEventListener("click", () => {
+    btnBake.disabled = true;
+    bakeStatusEl.textContent = "starting bake…";
+    bakeStatusEl.className = "bake-status baking";
+    void post("/api/tiles/bake")
+      .then(async (res) => {
+        if ((res as { error?: string }).error) {
+          bakeStatusEl.textContent = String((res as { error?: string }).error);
+          bakeStatusEl.className = "bake-status bake-error";
+          btnBake.disabled = false;
+          return;
+        }
+        baking = true;
+        startBakePoll();
+        await refreshStats();
+      })
+      .catch(() => {
+        bakeStatusEl.textContent = "bake request failed";
+        bakeStatusEl.className = "bake-status bake-error";
+        btnBake.disabled = false;
+      });
   });
 
   const es = new EventSource(`${API_BASE}/api/stream`);

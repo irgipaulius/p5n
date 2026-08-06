@@ -14,22 +14,14 @@ export function registerPmtilesProtocol(): Protocol {
   return new Protocol();
 }
 
-export function basemapStyle(dark: boolean): maplibregl.StyleSpecification {
-  const tiles = dark
-    ? ["https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"]
-    : ["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png"];
-  return {
-    version: 8,
-    sources: {
-      basemap: {
-        type: "raster",
-        tiles,
-        tileSize: 256,
-        attribution: "© OpenStreetMap © CARTO",
-      },
-    },
-    layers: [{ id: "basemap", type: "raster", source: "basemap" }],
-  };
+/** Vector basemaps — sharp at every zoom; landcover/roads/water are styled, not flat grey. */
+const BASEMAP_DARK =
+  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+const BASEMAP_LIGHT =
+  "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json";
+
+export function basemapStyle(dark: boolean): string {
+  return dark ? BASEMAP_DARK : BASEMAP_LIGHT;
 }
 
 export function pinsPmtilesUrl(config: P5nConfig): string | null {
@@ -86,6 +78,9 @@ export function addDeltaGeoJsonSource(map: maplibregl.Map, sourceId = "pins-delt
     type: "geojson",
     data: { type: "FeatureCollection", features: [] },
     promoteId: "id",
+    cluster: true,
+    clusterMaxZoom: 11,
+    clusterRadius: 48,
   });
 }
 

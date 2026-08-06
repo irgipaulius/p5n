@@ -24,6 +24,11 @@ export interface TileManifest {
   place_count: number;
   bytes: number;
   url: string | null;
+  bake_status?: string;
+  bake_progress?: number;
+  bake_total?: number;
+  bake_error?: string | null;
+  bake_started_at?: string | null;
 }
 
 export interface AttributeDef {

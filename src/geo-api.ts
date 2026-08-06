@@ -156,6 +156,11 @@ export async function handleTileManifest(env: Env, request: Request): Promise<Re
     place_count: (manifest as { place_count?: number })?.place_count ?? 0,
     bytes: (manifest as { bytes?: number })?.bytes ?? 0,
     url,
+    bake_status: (manifest as { bake_status?: string })?.bake_status ?? "idle",
+    bake_progress: (manifest as { bake_progress?: number })?.bake_progress ?? 0,
+    bake_total: (manifest as { bake_total?: number })?.bake_total ?? 0,
+    bake_error: (manifest as { bake_error?: string | null })?.bake_error ?? null,
+    bake_started_at: (manifest as { bake_started_at?: string | null })?.bake_started_at ?? null,
   });
 }
 

@@ -40,6 +40,7 @@ import {
 } from "./geo-api";
 import { buildEuropeGrid } from "./placeTypes";
 import { pauseScrape, resumeScrape, startScrape } from "./scrape";
+import { getTileBakeStatus, listTileChunks, runTileBake, startTileBake } from "./tile-bake";
 import type { CommentApi, Env } from "./types";
 
 export default {
@@ -92,6 +93,29 @@ export default {
 
       if (request.method === "GET" && pathname === "/api/tiles/manifest") {
         return handleTileManifest(env, request);
+      }
+
+      if (request.method === "GET" && pathname === "/api/tiles/bake/status") {
+        const status = await getTileBakeStatus(env);
+        return json(status ?? { bake_status: "idle" });
+      }
+
+      if (request.method === "GET" && pathname === "/api/tiles/chunks") {
+        const ids = (url.searchParams.get("ids") ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 24);
+        const chunks = await listTileChunks(env, ids, request);
+        return json({ chunks }, 200, { "cache-control": "public, max-age=300" });
+      }
+
+      if (request.method === "POST" && pathname === "/api/tiles/bake") {
+        const start = await startTileBake(env);
+        if (!start.ok) return json(start, start.error === "bake already running" ? 409 : 503);
+        ctx.waitUntil(runTileBake(env));
+        await emit(writeDb(env), "tile bake queued from dashboard");
+        return json({ ok: true, started: true });
       }
 
       if (request.method === "GET" && pathname === "/api/places/geo") {

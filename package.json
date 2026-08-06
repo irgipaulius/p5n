@@ -3,7 +3,11 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "workspaces": ["sdk", "app", "tiles"],
+  "workspaces": [
+    "sdk",
+    "app",
+    "tiles"
+  ],
   "scripts": {
     "dev": "wrangler dev",
     "dev:app": "npm run dev -w @p5n/app",
@@ -24,5 +28,10 @@
     "concurrently": "^9.2.0",
     "typescript": "^5.8.3",
     "wrangler": "^4.28.0"
+  },
+  "dependencies": {
+    "geojson-vt": "^4.0.3",
+    "s2-pmtiles": "^1.1.2",
+    "vt-pbf": "^3.1.3"
   }
 }

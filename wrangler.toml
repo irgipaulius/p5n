@@ -23,11 +23,10 @@ database_name = "p5n"
 database_id = "5aa08f10-82e4-4ab3-9615-009b5c6540d7"
 migrations_dir = "migrations"
 
-# R2 optional — enable in Cloudflare dashboard, then uncomment for tile baking.
-# [[r2_buckets]]
-# binding = "TILES"
-# bucket_name = "p5n-tiles"
-# preview_bucket_name = "p5n-tiles-preview"
+[[r2_buckets]]
+binding = "TILES"
+bucket_name = "p5n-tiles"
+preview_bucket_name = "p5n-tiles-preview"
 
 [assets]
 directory = "./app/dist"

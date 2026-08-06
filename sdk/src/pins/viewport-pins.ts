@@ -2,21 +2,9 @@ import type maplibregl from "maplibre-gl";
 import { geohash4CellsForBbox } from "../geohash";
 import type { PinFeature } from "../types";
 import type { PinSessionCache } from "./pin-cache";
+import { shouldFetchPins, viewportBbox } from "./zoom-policy";
 
-export function expandedBbox(
-  map: maplibregl.Map,
-  padRatio = 0.2,
-): { west: number; south: number; east: number; north: number } {
-  const b = map.getBounds();
-  const w = b.getEast() - b.getWest();
-  const h = b.getNorth() - b.getSouth();
-  return {
-    west: b.getWest() - w * padRatio,
-    south: b.getSouth() - h * padRatio,
-    east: b.getEast() + w * padRatio,
-    north: b.getNorth() + h * padRatio,
-  };
-}
+export { viewportBbox as expandedBbox, shouldFetchPins };
 
 export function pinInBbox(
   pin: { lat: number; lng: number },
@@ -30,11 +18,12 @@ export function pinInBbox(
   );
 }
 
-const MAX_TILES_PER_REQUEST = 96;
-const MAX_PARALLEL_REQUESTS = 8;
+const MAX_TILES_PER_REQUEST = 48;
+const MAX_PARALLEL_REQUESTS = 4;
+const MAX_PINS_IN_VIEW = 4000;
 
 export async function fetchViewportPins(apiBase: string, map: maplibregl.Map): Promise<PinFeature[]> {
-  const { west, south, east, north } = expandedBbox(map);
+  const { west, south, east, north } = viewportBbox(map);
   const params = new URLSearchParams({
     west: String(west),
     south: String(south),
@@ -83,6 +72,11 @@ async function fetchPinTiles(
   return merged;
 }
 
+function capPins(pins: PinFeature[]): PinFeature[] {
+  if (pins.length <= MAX_PINS_IN_VIEW) return pins;
+  return pins.slice(0, MAX_PINS_IN_VIEW);
+}
+
 /** Load missing geohash4 tiles into cache; render from cache only. */
 export async function syncViewportPins(
   apiBase: string,
@@ -90,7 +84,11 @@ export async function syncViewportPins(
   cache: PinSessionCache,
   onProgress?: () => void,
 ): Promise<{ visible: number; fetched: number; cached: number }> {
-  const bbox = expandedBbox(map);
+  if (!shouldFetchPins(map)) {
+    return { visible: 0, fetched: 0, cached: cache.size };
+  }
+
+  const bbox = viewportBbox(map);
   const cells = geohash4CellsForBbox(bbox);
   const missing = cache.missingTiles(cells);
 
@@ -101,7 +99,7 @@ export async function syncViewportPins(
     });
   }
 
-  const visible = cache.pinsInBbox(bbox);
+  const visible = capPins(cache.pinsInBbox(bbox));
   return { visible: visible.length, fetched: missing.length, cached: cache.size };
 }
 
@@ -112,18 +110,23 @@ export function scheduleViewportPins(
   apiBase: string,
   cache: PinSessionCache,
   onPins: (pins: PinFeature[], meta: { fromCache: boolean }) => void,
-  delayMs = 250,
+  delayMs = 300,
 ): void {
-  const bbox = expandedBbox(map);
-  onPins(cache.pinsInBbox(bbox), { fromCache: true });
+  if (!shouldFetchPins(map)) {
+    onPins([], { fromCache: true });
+    return;
+  }
+
+  const bbox = viewportBbox(map);
+  onPins(capPins(cache.pinsInBbox(bbox)), { fromCache: true });
 
   if (loadTimer) clearTimeout(loadTimer);
   const delay = cache.size === 0 ? 0 : delayMs;
   loadTimer = setTimeout(() => {
     void syncViewportPins(apiBase, map, cache, () => {
-      onPins(cache.pinsInBbox(expandedBbox(map)), { fromCache: false });
+      onPins(capPins(cache.pinsInBbox(viewportBbox(map))), { fromCache: false });
     }).then(() => {
-      onPins(cache.pinsInBbox(expandedBbox(map)), { fromCache: false });
+      onPins(capPins(cache.pinsInBbox(viewportBbox(map))), { fromCache: false });
     });
   }, delay);
 }

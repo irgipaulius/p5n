@@ -13,16 +13,45 @@ function typeColorMatch(): maplibregl.ExpressionSpecification {
   return expr as maplibregl.ExpressionSpecification;
 }
 
-/** Circle + symbol layers for a geojson pin source. */
-export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string): void {
+/** Circle + symbol layers for a geojson pin source (with GPU clustering). */
+export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clustered = true): void {
+  const clusterId = `${sourceId}-clusters`;
   const circleId = `${sourceId}-circles`;
   const symbolId = `${sourceId}-symbols`;
+
+  if (clustered && !map.getLayer(clusterId)) {
+    map.addLayer({
+      id: clusterId,
+      type: "circle",
+      source: sourceId,
+      filter: ["has", "point_count"],
+      maxzoom: 12,
+      paint: {
+        "circle-color": [
+          "step",
+          ["get", "point_count"],
+          "#38bdf8",
+          25,
+          "#0ea5e9",
+          100,
+          "#0284c7",
+          500,
+          "#0369a1",
+        ],
+        "circle-radius": ["step", ["get", "point_count"], 16, 25, 20, 100, 26, 500, 34],
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#0f172a",
+        "circle-opacity": 0.9,
+      },
+    });
+  }
 
   if (!map.getLayer(circleId)) {
     map.addLayer({
       id: circleId,
       type: "circle",
       source: sourceId,
+      filter: clustered ? ["!", ["has", "point_count"]] : undefined,
       minzoom: 0,
       maxzoom: 11.5,
       paint: {
@@ -40,6 +69,7 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string): void
       id: symbolId,
       type: "symbol",
       source: sourceId,
+      filter: clustered ? ["!", ["has", "point_count"]] : undefined,
       minzoom: 11.5,
       layout: {
         "icon-image": iconImageExpression(),
@@ -100,7 +130,7 @@ export function addDeltaPinLayers(map: maplibregl.Map, sourceId = "pins-delta"):
 }
 
 export function deltaLayerIds(deltaId = "pins-delta"): string[] {
-  return [`${deltaId}-circles`, `${deltaId}-symbols`];
+  return [`${deltaId}-clusters`, `${deltaId}-circles`, `${deltaId}-symbols`];
 }
 
 export function baseLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): string[] {
@@ -112,7 +142,7 @@ export function baseLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): s
 }
 
 export function filteredLayerIds(filteredId = "pins-filtered"): string[] {
-  return [`${filteredId}-circles`, `${filteredId}-symbols`];
+  return [`${filteredId}-clusters`, `${filteredId}-circles`, `${filteredId}-symbols`];
 }
 
 export function clickableLayerIds(

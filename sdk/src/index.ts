@@ -4,8 +4,10 @@ import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
 import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setSelectedPinFeature, setTypeFilter } from "./layers/pins";
-import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins } from "./pins/viewport-pins";
+import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins } from "./pins/viewport-pins";
 import { PinSessionCache } from "./pins/pin-cache";
+import { ChunkTileLoader } from "./pins/chunk-loader";
+import { CHUNK_LOAD_MIN_ZOOM, PIN_FETCH_MIN_ZOOM } from "./pins/zoom-policy";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -40,6 +42,7 @@ export class P5nMap {
     });
     registerPmtilesProtocol();
     this.map = createMap(container, config);
+    this.chunkLoader = new ChunkTileLoader(this.map, config.apiBase);
     this.map.on("load", () => {
       this.styleReady = true;
       void this.attachSources().then(() => this.resolveLayersReady());
@@ -53,6 +56,9 @@ export class P5nMap {
 
   private filteredFeatures: GeoJSON.Feature[] = [];
   private pinCache = new PinSessionCache();
+  private chunkLoader!: ChunkTileLoader;
+  private useBakedTiles = false;
+  private deltaFeatureCount = -1;
 
   private async attachSources(): Promise<void> {
     await registerPinIcons(this.map);
@@ -90,6 +96,9 @@ export class P5nMap {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
         promoteId: "id",
+        cluster: true,
+        clusterMaxZoom: 11,
+        clusterRadius: 48,
       });
       addGeoJsonPinLayers(this.map, this.filteredSourceId);
     }
@@ -115,10 +124,19 @@ export class P5nMap {
   private flushDeltaPins(): void {
     const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
     if (!src) return;
-    src.setData({ type: "FeatureCollection", features: [...this.deltaFeatures] });
+    const n = this.deltaFeatures.length;
+    if (n === this.deltaFeatureCount) return;
+    this.deltaFeatureCount = n;
+    src.setData({ type: "FeatureCollection", features: this.deltaFeatures });
   }
 
   async loadViewportPins(): Promise<number> {
+    if (this.useBakedTiles) return 0;
+    await this.chunkLoader.sync();
+    if (!shouldFetchPins(this.map)) {
+      this.setDeltaPins([]);
+      return 0;
+    }
     const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
     const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
     refresh();
@@ -141,7 +159,13 @@ export class P5nMap {
   }
 
   isPinInView(pin: { lat: number; lng: number }): boolean {
-    return pinInBbox(pin, expandedBbox(this.map, 0));
+    const b = this.map.getBounds();
+    return pinInBbox(pin, {
+      west: b.getWest(),
+      south: b.getSouth(),
+      east: b.getEast(),
+      north: b.getNorth(),
+    });
   }
 
   selectPin(pin: { id: string; lat: number; lng: number; t: number } | null): void {
@@ -156,14 +180,30 @@ export class P5nMap {
   onMoveEndLoadPins(): void {
     this.map.on("moveend", () => {
       if (this.filterMode) return;
+      void this.chunkLoader.sync();
+      if (this.useBakedTiles) return;
+      if (!shouldFetchPins(this.map)) {
+        this.setDeltaPins([]);
+        return;
+      }
       scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
         this.setDeltaPins(pins);
       });
     });
   }
 
+  /** Minimum zoom before regional chunk tiles load. */
+  pinZoomHint(): string | null {
+    const z = this.map.getZoom();
+    if (z < CHUNK_LOAD_MIN_ZOOM) return `Zoom in to see pins (z${CHUNK_LOAD_MIN_ZOOM}+)`;
+    if (!this.useBakedTiles && this.chunkLoader.loadedCount() === 0 && z < PIN_FETCH_MIN_ZOOM) {
+      return `Zoom in further for detail (z${PIN_FETCH_MIN_ZOOM}+)`;
+    }
+    return null;
+  }
+
   addLivePinIfVisible(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): boolean {
-    if (this.filterMode) return false;
+    if (this.filterMode || !shouldFetchPins(this.map)) return false;
     if (!this.isPinInView(pin)) return false;
     this.pinCache.addPin(pin as PinFeature);
     this.addLivePin(pin);
@@ -175,18 +215,54 @@ export class P5nMap {
     return this.pinCache.size;
   }
 
-  async initTilesFromManifest(): Promise<void> {
+  async initTilesFromManifest(): Promise<boolean> {
     try {
       const manifest = await fetchTileManifest(this.config.apiBase);
       if (manifest.url) {
         this.config.tilesUrl = manifest.url.startsWith("pmtiles://")
           ? manifest.url
           : `pmtiles://${manifest.url}`;
+        this.useBakedTiles = true;
         if (this.styleReady) await this.attachSources();
+        return true;
       }
     } catch {
       /* no baked tiles yet */
     }
+    return false;
+  }
+
+  /** Reload PMTiles after a dashboard bake (new manifest version). */
+  async reloadBakedTiles(): Promise<boolean> {
+    try {
+      this.chunkLoader.clear();
+      this.setDeltaPins([]);
+
+      const manifest = await fetchTileManifest(this.config.apiBase);
+      if (manifest.url) {
+        const url = manifest.url.startsWith("pmtiles://") ? manifest.url : `pmtiles://${manifest.url}`;
+        if (this.config.tilesUrl !== url || !this.map.getSource(this.pinsSourceId)) {
+          this.config.tilesUrl = url;
+          this.useBakedTiles = true;
+          for (const id of [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`]) {
+            if (this.map.getLayer(id)) this.map.removeLayer(id);
+          }
+          if (this.map.getSource(this.pinsSourceId)) this.map.removeSource(this.pinsSourceId);
+          if (this.styleReady) await this.attachSources();
+        }
+      } else {
+        this.useBakedTiles = false;
+      }
+
+      await this.chunkLoader.sync();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  hasBakedTiles(): boolean {
+    return this.useBakedTiles || this.chunkLoader.loadedCount() > 0;
   }
 
   async tryOfflineFirst(): Promise<boolean> {
@@ -195,6 +271,7 @@ export class P5nMap {
     if (!blobUrl) return false;
     this.config.offlineTilesPath = blobUrl;
     this.config.tilesUrl = null;
+    this.useBakedTiles = true;
     if (this.styleReady) await this.attachSources();
     return true;
   }
@@ -305,10 +382,33 @@ export class P5nMap {
 
   onPinClick(handler: (pin: { id: string; lat: number; lng: number; t: number }) => void): void {
     const layers = clickableLayerIds(this.pinsSourceId, this.deltaSourceId, this.filteredSourceId);
+    const clusterLayers = [
+      `${this.deltaSourceId}-clusters`,
+      `${this.filteredSourceId}-clusters`,
+    ];
+
+    for (const layerId of clusterLayers) {
+      if (!this.map.getLayer(layerId)) continue;
+      this.map.on("click", layerId, (e) => {
+        const f = e.features?.[0];
+        if (!f?.properties?.cluster_id) return;
+        const src = this.map.getSource(
+          layerId.startsWith(this.filteredSourceId) ? this.filteredSourceId : this.deltaSourceId,
+        ) as maplibregl.GeoJSONSource;
+        const clusterId = Number(f.properties.cluster_id);
+        void src.getClusterExpansionZoom(clusterId).then((zoom) => {
+          if (f.geometry.type !== "Point") return;
+          this.map.easeTo({ center: f.geometry.coordinates as [number, number], zoom: zoom + 0.5 });
+        });
+      });
+    }
+
     for (const layerId of layers) {
+      if (layerId.endsWith("-clusters")) continue;
       this.map.on("click", layerId, (e) => {
         const f = e.features?.[0];
         if (!f || f.geometry.type !== "Point") return;
+        if (f.properties?.cluster_id) return;
         const id = String(f.properties?.id ?? f.id ?? "");
         if (!id) return;
         const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
