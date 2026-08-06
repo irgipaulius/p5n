@@ -265,6 +265,7 @@ export default {
     if (state.paused || state.storage_handbrake) return;
     await reclaimStaleLeases(db);
     await reclaimCrawlLease(db);
+    await queueNextDiscoveryCells(db, 24);
     if (!(await crawlWorkRemaining(db))) return;
     kickCrawlChain(env, ctx);
   },

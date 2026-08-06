@@ -1,4 +1,6 @@
 import { attrIcon, typeIconSvg } from "@p5n/sdk";
+import PhotoSwipeLightbox from "photoswipe/lightbox";
+import "photoswipe/style.css";
 
 interface AttributeDef {
   bit_index: number;
@@ -88,14 +90,16 @@ function carouselHtml(photos: PlacePhoto[]): string {
   const slides = photos
     .map(
       (p, i) =>
-        `<div class="carousel-slide${i === 0 ? " active" : ""}" data-i="${i}"><img src="${escapeHtml(p.large)}" alt="" loading="${i === 0 ? "eager" : "lazy"}" /></div>`,
+        `<a href="${escapeHtml(p.large)}" class="carousel-slide${i === 0 ? " active" : ""}" data-i="${i}" data-pswp-width="1920" data-pswp-height="1280" target="_blank" rel="noopener">
+          <img src="${escapeHtml(p.large)}" alt="" loading="${i === 0 ? "eager" : "lazy"}" />
+        </a>`,
     )
     .join("");
   const dots =
     photos.length > 1
       ? photos.map((_, i) => `<button type="button" class="carousel-dot${i === 0 ? " active" : ""}" data-i="${i}"></button>`).join("")
       : "";
-  return `<div class="photo-carousel" data-count="${photos.length}">
+  return `<div class="photo-carousel pswp-gallery" data-count="${photos.length}">
     ${photos.length > 1 ? `<button type="button" class="carousel-nav carousel-prev" aria-label="Previous">‹</button>` : ""}
     <div class="carousel-track">${slides}</div>
     ${photos.length > 1 ? `<button type="button" class="carousel-nav carousel-next" aria-label="Next">›</button>` : ""}
@@ -179,26 +183,66 @@ export function initPlaceDetailPanel(root: HTMLElement): void {
     dots.forEach((d, n) => d.classList.toggle("active", n === idx));
   };
 
-  carousel.querySelector(".carousel-prev")?.addEventListener("click", () => show(idx - 1));
-  carousel.querySelector(".carousel-next")?.addEventListener("click", () => show(idx + 1));
-  dots.forEach((d) => d.addEventListener("click", () => show(Number(d.dataset.i))));
+  carousel.querySelector(".carousel-prev")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    show(idx - 1);
+  });
+  carousel.querySelector(".carousel-next")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    show(idx + 1);
+  });
+  dots.forEach((d) =>
+    d.addEventListener("click", (e) => {
+      e.stopPropagation();
+      show(Number(d.dataset.i));
+    }),
+  );
 
   let touchX = 0;
   carousel.addEventListener(
     "touchstart",
-    (e) => {
+    (e: TouchEvent) => {
       touchX = e.touches[0].clientX;
     },
     { passive: true },
   );
   carousel.addEventListener(
     "touchend",
-    (e) => {
+    (e: TouchEvent) => {
       const dx = e.changedTouches[0].clientX - touchX;
       if (Math.abs(dx) > 40) show(idx + (dx < 0 ? 1 : -1));
     },
     { passive: true },
   );
+
+  initPhotoLightbox(carousel as HTMLElement);
+}
+
+let activeLightbox: PhotoSwipeLightbox | null = null;
+
+function initPhotoLightbox(gallery: HTMLElement): void {
+  activeLightbox?.destroy();
+  activeLightbox = new PhotoSwipeLightbox({
+    gallery,
+    children: "a.carousel-slide",
+    pswpModule: () => import("photoswipe"),
+    showHideAnimationType: "zoom",
+    bgOpacity: 0.92,
+    wheelToZoom: true,
+    pinchToClose: true,
+    closeOnVerticalDrag: true,
+    padding: { top: 20, bottom: 40, left: 20, right: 20 },
+  });
+  activeLightbox.on("uiRegister", () => {
+    activeLightbox?.pswp?.ui?.registerElement({
+      name: "carousel-hint",
+      order: 9,
+      isButton: false,
+      appendTo: "wrapper",
+      html: '<div class="pswp-carousel-hint">Swipe or use arrows · tap outside to close</div>',
+    });
+  });
+  activeLightbox.init();
 }
 
 export async function loadPlaceDetail(apiBase: string, placeId: string, withReviews: boolean): Promise<PlaceDetail> {

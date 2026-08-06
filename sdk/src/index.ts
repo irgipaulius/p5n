@@ -3,7 +3,7 @@ import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView } from "./geo/initial-view";
-import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setTypeFilter } from "./layers/pins";
+import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setSelectedPinFeature, setTypeFilter } from "./layers/pins";
 import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins } from "./pins/viewport-pins";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
@@ -48,6 +48,7 @@ export class P5nMap {
   private filteredSourceId = "pins-filtered";
   private filterMode = false;
   private activeTypeFilter: number[] | null = null;
+  private selectedPin: { id: string; lat: number; lng: number; t: number } | null = null;
 
   private filteredFeatures: GeoJSON.Feature[] = [];
 
@@ -59,6 +60,7 @@ export class P5nMap {
       addPinLayers(this.map, this.pinsSourceId);
     }
     await this.ensureDeltaLayer();
+    setSelectedPinFeature(this.map, this.selectedPin);
     this.layerAttach = () => {
       void this.attachSources();
     };
@@ -137,6 +139,15 @@ export class P5nMap {
 
   isPinInView(pin: { lat: number; lng: number }): boolean {
     return pinInBbox(pin, expandedBbox(this.map, 0));
+  }
+
+  selectPin(pin: { id: string; lat: number; lng: number; t: number } | null): void {
+    this.selectedPin = pin;
+    setSelectedPinFeature(this.map, pin);
+  }
+
+  getSelectedPinId(): string | null {
+    return this.selectedPin?.id ?? null;
   }
 
   onMoveEndLoadPins(): void {
@@ -282,14 +293,16 @@ export class P5nMap {
     this.applyVisibilityState();
   }
 
-  onPinClick(handler: (placeId: string) => void): void {
+  onPinClick(handler: (pin: { id: string; lat: number; lng: number; t: number }) => void): void {
     const layers = clickableLayerIds(this.pinsSourceId, this.deltaSourceId, this.filteredSourceId);
     for (const layerId of layers) {
       this.map.on("click", layerId, (e) => {
         const f = e.features?.[0];
-        if (!f) return;
+        if (!f || f.geometry.type !== "Point") return;
         const id = String(f.properties?.id ?? f.id ?? "");
-        if (id) handler(id);
+        if (!id) return;
+        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
+        handler({ id, lat, lng, t: Number(f.properties?.t ?? 3) });
       });
       this.map.on("mouseenter", layerId, () => {
         this.map.getCanvas().style.cursor = "pointer";

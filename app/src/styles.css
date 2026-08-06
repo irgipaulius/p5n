@@ -474,6 +474,9 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   opacity: 0;
   transition: opacity 0.2s;
   pointer-events: none;
+  display: block;
+  text-decoration: none;
+  color: inherit;
 }
 
 .carousel-slide.active {
@@ -485,6 +488,7 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   width: 100%;
   height: 100%;
   object-fit: cover;
+  cursor: zoom-in;
 }
 
 .carousel-nav {
@@ -528,6 +532,18 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
 
 .carousel-dot.active {
   background: #fff;
+}
+
+.pswp-carousel-hint {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  pointer-events: none;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .detail-reviews-wrap {

@@ -51,6 +51,13 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
       const { status, body, data } = await fetchJson(env, url);
       if (status >= 500) throw new Error(`filter HTTP ${status}`);
       const parsed = data as { status?: string; lieux?: PlaceApi[] };
+      if (parsed.status === "ERROR") {
+        if (cellId != null && passId != null) {
+          await markCellDone(db, passId, cellId, 0);
+        }
+        await emit(db, `filter ${lat},${lng}: p4n ERROR — empty cell skipped`, "info");
+        return;
+      }
       if (parsed.status !== "OK") throw new Error(`filter not OK: ${body.slice(0, 200)}`);
 
       const places = parsed.lieux ?? [];
@@ -256,7 +263,9 @@ function chainRequest(env: Env, ctx: ExecutionContext): void {
         method: "POST",
         headers: { "X-Crawl-Chain": secret },
       });
+  // Keep the subrequest alive; do not abort the child worker response.
   ctx.waitUntil(p.catch(() => undefined));
+  void p.catch(() => undefined);
 }
 
 /** Kick another Worker invocation whenever work remains (not just on time budget). */

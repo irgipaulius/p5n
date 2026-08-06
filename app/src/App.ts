@@ -128,21 +128,30 @@ export function mountApp(root: HTMLElement): void {
     buildAttrFilters();
   })();
 
-  p5n.onPinClick(async (placeId) => {
+  p5n.onPinClick(async (pin) => {
+    p5n.selectPin(pin);
     detailEl.classList.add("open");
     detailEl.innerHTML = `<header class="detail-head"><h2>Loading…</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">Fetching place…</p>`;
-    detailEl.querySelector("#btn-close-detail")?.addEventListener("click", () => detailEl.classList.remove("open"));
+    detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
     try {
-      const data = await loadPlaceDetail(API_BASE, placeId, true);
+      const data = await loadPlaceDetail(API_BASE, pin.id, true);
+      if (data.lat != null && data.lng != null) {
+        p5n.selectPin({ id: pin.id, lat: data.lat, lng: data.lng, t: pin.t });
+      }
       const typeInt = typeToInt(String(data.type || "P"));
       detailEl.innerHTML = renderPlaceDetail(data, attributes, typeInt);
       initPlaceDetailPanel(detailEl);
-      detailEl.querySelector("#btn-close-detail")?.addEventListener("click", () => detailEl.classList.remove("open"));
+      detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
     } catch (err) {
       detailEl.innerHTML = `<header class="detail-head"><h2>Error</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">${escapeHtml(String(err))}</p>`;
-      detailEl.querySelector("#btn-close-detail")?.addEventListener("click", () => detailEl.classList.remove("open"));
+      detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
     }
   });
+
+  function closeDetail(): void {
+    detailEl.classList.remove("open");
+    p5n.selectPin(null);
+  }
 
   async function loadAttributes(): Promise<void> {
     const resp = await fetch(`${API_BASE}/api/attributes`);

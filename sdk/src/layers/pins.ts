@@ -164,3 +164,67 @@ export function applyEnrichmentFeatureState(
     );
   }
 }
+
+const SELECTED_SOURCE = "pins-selected";
+
+/** Highlight ring + icon for the actively selected pin (always on top). */
+export function ensureSelectedPinLayer(map: maplibregl.Map): void {
+  if (!map.getSource(SELECTED_SOURCE)) {
+    map.addSource(SELECTED_SOURCE, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+  }
+  if (!map.getLayer(`${SELECTED_SOURCE}-halo`)) {
+    map.addLayer({
+      id: `${SELECTED_SOURCE}-halo`,
+      type: "circle",
+      source: SELECTED_SOURCE,
+      paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 14, 10, 18, 14, 24],
+        "circle-color": "#38bdf8",
+        "circle-opacity": 0.35,
+        "circle-stroke-width": 3,
+        "circle-stroke-color": "#e0f2fe",
+        "circle-stroke-opacity": 0.95,
+      },
+    });
+  }
+  if (!map.getLayer(`${SELECTED_SOURCE}-icon`)) {
+    map.addLayer({
+      id: `${SELECTED_SOURCE}-icon`,
+      type: "symbol",
+      source: SELECTED_SOURCE,
+      layout: {
+        "icon-image": iconImageExpression(),
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 4, 1.1, 10, 1.35, 14, 1.6],
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
+      },
+    });
+  }
+}
+
+export function setSelectedPinFeature(
+  map: maplibregl.Map,
+  pin: { id: string; lat: number; lng: number; t: number } | null,
+): void {
+  ensureSelectedPinLayer(map);
+  const src = map.getSource(SELECTED_SOURCE) as maplibregl.GeoJSONSource | undefined;
+  if (!src) return;
+  if (!pin) {
+    src.setData({ type: "FeatureCollection", features: [] });
+    return;
+  }
+  src.setData({
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        id: pin.id,
+        geometry: { type: "Point", coordinates: [pin.lng, pin.lat] },
+        properties: { id: pin.id, t: pin.t, name: "" },
+      },
+    ],
+  });
+}
