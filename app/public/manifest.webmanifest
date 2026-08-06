@@ -1,9 +1,17 @@
 {
-  "name": "p5n map",
+  "name": "Park5Night Map",
   "short_name": "p5n",
+  "description": "Park4Night places on a map",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
-  "icons": []
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

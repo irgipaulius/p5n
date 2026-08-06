@@ -74,6 +74,7 @@ export function handleStreamingSearch(env: Env, url: URL): Response {
     : undefined;
   const hasPhotos = url.searchParams.get("has_photos") === "1";
   const max = Math.min(5000, Number(url.searchParams.get("limit") || 2000));
+  const bbox = parseBbox(url);
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -89,6 +90,10 @@ export function handleStreamingSearch(env: Env, url: URL): Response {
             attrs1,
             minRating,
             hasPhotos: hasPhotos || undefined,
+            west: bbox?.west,
+            south: bbox?.south,
+            east: bbox?.east,
+            north: bbox?.north,
             offset,
             limit: Math.min(PAGE_SIZE, max - sent),
           });

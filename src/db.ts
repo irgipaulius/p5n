@@ -838,11 +838,15 @@ export async function searchPlacesPage(
     type?: string;
     minRating?: number;
     hasPhotos?: boolean;
+    west?: number;
+    south?: number;
+    east?: number;
+    north?: number;
     offset: number;
     limit: number;
   },
 ): Promise<SearchPin[]> {
-  const { q, attrs0, attrs1, type, minRating, hasPhotos, offset, limit } = opts;
+  const { q, attrs0, attrs1, type, minRating, hasPhotos, west, south, east, north, offset, limit } = opts;
   const binds: (string | number)[] = [];
   let sql: string;
 
@@ -866,6 +870,10 @@ export async function searchPlacesPage(
     }
     if (hasPhotos) {
       clause += ` AND ${alias}.photo_count > 0`;
+    }
+    if (west != null && south != null && east != null && north != null) {
+      clause += ` AND ${alias}.lat BETWEEN ? AND ? AND ${alias}.lng BETWEEN ? AND ?`;
+      binds.push(south, north, west, east);
     }
     return clause;
   };

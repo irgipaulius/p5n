@@ -1,4 +1,4 @@
-const CACHE = "p5n-shell-v1";
+const CACHE = "p5n-shell-v2";
 const SHELL = ["/", "/assets/index.js", "/assets/index.css"];
 
 self.addEventListener("install", (ev) => {

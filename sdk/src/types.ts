@@ -41,6 +41,10 @@ export interface SearchOptions {
   minRating?: number;
   hasPhotos?: boolean;
   limit?: number;
+  west?: number;
+  south?: number;
+  east?: number;
+  north?: number;
   onPin?: (pin: PinFeature) => void;
   signal?: AbortSignal;
 }

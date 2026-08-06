@@ -1,6 +1,7 @@
 import { P5nMap, TYPE_LABELS, attrIcon, typeIconSvg, typeToInt, type PinFeature } from "@p5n/sdk";
 import maplibregl from "maplibre-gl";
 import { installDrawerSwipe } from "./drawer-swipe";
+import { canShowInstallButton, promptInstall, watchInstallPrompt } from "./install-app";
 import { initPlaceDetailPanel, loadPlaceDetail, parsePlaceIdFromPath, renderPlaceDetail } from "./place-detail";
 
 const API_BASE = import.meta.env.DEV ? "" : "";
@@ -19,16 +20,28 @@ export function mountApp(root: HTMLElement): void {
 
       <div class="float float-search glass">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 10.5 5 15 7.01 15 9.5 12.99 14 10.5 14z"/></svg>
-        <input type="search" id="search" placeholder="Search places, cities, features…" autocomplete="off" />
-        <button type="button" id="btn-search" class="btn btn-accent">Search</button>
+        <input type="search" id="search" placeholder="Search in this area…" autocomplete="off" />
+        <button type="button" id="btn-search" class="btn btn-accent desktop-only">Search</button>
         <span class="search-meta" id="search-meta"></span>
       </div>
 
-      <div class="float float-scrape glass">
-        <button type="button" id="btn-start" class="btn btn-accent">Start scrape</button>
-        <button type="button" id="btn-toggle" class="btn">Pause</button>
-        <div class="stats" id="stats">…</div>
-        <span class="status" id="status"></span>
+      <button type="button" class="float float-admin-toggle glass mobile-only" id="btn-admin-toggle" aria-expanded="false" aria-label="Scraper &amp; log">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+      </button>
+
+      <button type="button" class="float float-install glass mobile-only" id="btn-install" hidden aria-label="Add to home screen">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+        <span>Install</span>
+      </button>
+
+      <div class="admin-wrap" id="admin-wrap">
+        <div class="float float-scrape glass">
+          <button type="button" id="btn-start" class="btn btn-accent">Start scrape</button>
+          <button type="button" id="btn-toggle" class="btn">Pause</button>
+          <div class="stats" id="stats">…</div>
+          <span class="status" id="status"></span>
+        </div>
+        <div class="float float-log glass" id="log"></div>
       </div>
 
       <button type="button" class="float float-filters-btn glass" id="btn-filters" aria-expanded="false">
@@ -77,7 +90,6 @@ export function mountApp(root: HTMLElement): void {
       </aside>
 
       <aside class="float float-detail glass" id="detail"></aside>
-      <div class="float float-log glass" id="log"></div>
     </div>
   `;
 
@@ -98,8 +110,15 @@ export function mountApp(root: HTMLElement): void {
   const starHint = root.querySelector("#star-hint") as HTMLElement;
   const hasPhotosEl = root.querySelector("#has-photos") as HTMLInputElement;
   const chipPhotos = root.querySelector("#chip-photos") as HTMLElement;
+  const adminWrap = root.querySelector("#admin-wrap") as HTMLElement;
+  const btnAdminToggle = root.querySelector("#btn-admin-toggle") as HTMLButtonElement;
+  const btnInstall = root.querySelector("#btn-install") as HTMLButtonElement;
 
   let minRating = 0;
+  let searchAbort: AbortController | null = null;
+  let searchInputTimer: number | undefined;
+  let viewportSearchTimer: number | undefined;
+  let searchGeneration = 0;
 
   const p5n = new P5nMap(mapEl, { apiBase: API_BASE, dark: true });
   p5n.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
@@ -139,6 +158,7 @@ export function mountApp(root: HTMLElement): void {
     );
     p5n.onMoveEndLoadPins();
     p5n.onMoveEndEnrich();
+    p5n.map.on("moveend", () => scheduleViewportSearch(450));
     const n = await p5n.loadViewportPins();
     statusEl.textContent = n
       ? `${n} pins nearby`
@@ -271,8 +291,30 @@ export function mountApp(root: HTMLElement): void {
     return pins.filter((p) => selectedTypes.has(Number(p.t)));
   }
 
+  function mapBbox(): { west: number; south: number; east: number; north: number } {
+    const b = p5n.map.getBounds();
+    return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() };
+  }
+
   function hasAdvancedFilters(): boolean {
     return Boolean(searchInput.value.trim()) || selectedAttrs.size > 0 || minRating > 0 || hasPhotosEl.checked;
+  }
+
+  function scheduleSearchInput(): void {
+    window.clearTimeout(searchInputTimer);
+    searchInputTimer = window.setTimeout(() => {
+      if (!hasAdvancedFilters()) {
+        applyFilters();
+        return;
+      }
+      void applyAllFilters();
+    }, 250);
+  }
+
+  function scheduleViewportSearch(ms: number): void {
+    if (!hasAdvancedFilters()) return;
+    window.clearTimeout(viewportSearchTimer);
+    viewportSearchTimer = window.setTimeout(() => void applyAllFilters(), ms);
   }
 
   function applyFilters(): void {
@@ -287,43 +329,52 @@ export function mountApp(root: HTMLElement): void {
   }
 
   async function applyAllFilters(): Promise<void> {
+    const gen = ++searchGeneration;
+    searchAbort?.abort();
+    searchAbort = new AbortController();
+    const signal = searchAbort.signal;
+
     const q = searchInput.value.trim();
     const { attrs0, attrs1 } = attrMasks();
     const hasPhotos = hasPhotosEl.checked;
+    const bbox = mapBbox();
 
     const results: PinFeature[] = [];
     searchMeta.textContent = "searching…";
-    await p5n.search({
-      q: q || undefined,
-      attrs0,
-      attrs1,
-      minRating: minRating || undefined,
-      hasPhotos: hasPhotos || undefined,
-      limit: 500,
-      onPin: (pin) => {
-        results.push(pin);
-        const typed = filterByTypes(results);
-        p5n.showFilteredPins(typed);
-        searchMeta.textContent = `${typed.length}…`;
-      },
-    });
+    p5n.clearFilteredPins();
 
+    try {
+      await p5n.search({
+        q: q || undefined,
+        attrs0,
+        attrs1,
+        minRating: minRating || undefined,
+        hasPhotos: hasPhotos || undefined,
+        limit: 500,
+        west: bbox.west,
+        south: bbox.south,
+        east: bbox.east,
+        north: bbox.north,
+        signal,
+        onPin: (pin) => {
+          if (gen !== searchGeneration) return;
+          results.push(pin);
+          const typed = filterByTypes(results);
+          p5n.showFilteredPins(typed);
+          searchMeta.textContent = `${typed.length}…`;
+        },
+      });
+    } catch (err) {
+      if (signal.aborted) return;
+      searchMeta.textContent = "search failed";
+      return;
+    }
+
+    if (gen !== searchGeneration) return;
     const typed = filterByTypes(results);
     p5n.showFilteredPins(typed);
     p5n.filterTypes(selectedTypes.size ? [...selectedTypes] : []);
-    searchMeta.textContent = `${typed.length} results`;
-
-    if (typed.length) {
-      const lngs = typed.map((p) => p.lng);
-      const lats = typed.map((p) => p.lat);
-      p5n.map.fitBounds(
-        [
-          [Math.min(...lngs), Math.min(...lats)],
-          [Math.max(...lngs), Math.max(...lats)],
-        ],
-        { padding: 80, maxZoom: 12 },
-      );
-    }
+    searchMeta.textContent = typed.length ? `${typed.length} in view` : "none in view";
   }
 
   function updateStarUi(): void {
@@ -358,8 +409,33 @@ export function mountApp(root: HTMLElement): void {
   installDrawerSwipe(drawer, closeDrawer);
 
   root.querySelector("#btn-search")!.addEventListener("click", () => void applyAllFilters());
+  searchInput.addEventListener("input", () => scheduleSearchInput());
   searchInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void applyAllFilters();
+    if (e.key === "Enter") {
+      window.clearTimeout(searchInputTimer);
+      void applyAllFilters();
+    }
+  });
+
+  btnAdminToggle.addEventListener("click", () => {
+    const open = adminWrap.classList.toggle("open");
+    btnAdminToggle.setAttribute("aria-expanded", String(open));
+  });
+
+  watchInstallPrompt(() => {
+    if (canShowInstallButton()) btnInstall.hidden = false;
+  });
+  if (canShowInstallButton()) btnInstall.hidden = false;
+
+  btnInstall.addEventListener("click", () => {
+    void (async () => {
+      const outcome = await promptInstall();
+      if (outcome === "ios-help") {
+        window.alert("Tap Share in Safari, then “Add to Home Screen” to install this app.");
+      } else if (outcome === "accepted") {
+        btnInstall.hidden = true;
+      }
+    })();
   });
 
   btnFilters.addEventListener("click", () => {

@@ -10,6 +10,10 @@ export async function streamSearch(apiBase: string, opts: SearchOptions): Promis
   if (opts.minRating != null && opts.minRating > 0) params.set("min_rating", String(opts.minRating));
   if (opts.hasPhotos) params.set("has_photos", "1");
   if (opts.limit != null) params.set("limit", String(opts.limit));
+  if (opts.west != null) params.set("west", String(opts.west));
+  if (opts.south != null) params.set("south", String(opts.south));
+  if (opts.east != null) params.set("east", String(opts.east));
+  if (opts.north != null) params.set("north", String(opts.north));
 
   const resp = await fetch(`${apiBase}/api/search?${params}`, { signal: opts.signal });
   if (!resp.ok || !resp.body) throw new Error(`search ${resp.status}`);
