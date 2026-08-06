@@ -13,7 +13,7 @@ import {
 } from "./db";
 import { buildEuropeGrid } from "./placeTypes";
 
-const EUROPE_PASS_CELLS = 3;
+const EUROPE_PASS_CELLS = 24;
 
 /** Start or resume the Europe-wide discovery pass (runs until all cells done). */
 export async function startScrape(env: Env): Promise<{

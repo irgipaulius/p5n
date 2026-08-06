@@ -2,6 +2,7 @@ import {
   advancePass,
   claimJob,
   commentsUrl,
+  crawlWorkRemaining,
   emit,
   enqueueJob,
   fetchJson,
@@ -13,6 +14,7 @@ import {
   markCellError,
   placesCount,
   planAndEnqueueFilterIngest,
+  queueNextDiscoveryCells,
   reclaimStaleLeases,
   refreshKnownPlace,
   releaseCrawlLease,
@@ -100,8 +102,6 @@ async function handleJob(env: Env, job: JobRow, _owner: string) {
     if (!Array.isArray(places) || places.length === 0) throw new Error("ingest_chunk missing places");
 
     const n = await ingestPlacesChunk(db, places, scrapedAt);
-    const known = await placesCount(db);
-    await emit(db, `ingest chunk +${n} (archive=${known})`, "info", { new: n });
     return;
   }
 
@@ -161,7 +161,7 @@ export async function processOneJob(env: Env, owner: string): Promise<"did_work"
 
 export async function runCrawlLoop(
   env: Env,
-  opts: { maxSteps?: number; seed?: boolean; owner?: string; maxMs?: number } = {},
+  opts: { maxSteps?: number; seed?: boolean; owner?: string; maxMs?: number; quiet?: boolean } = {},
 ): Promise<{ steps: number; stopped: string }> {
   const db = writeDb(env);
   const lat = Number(env.DEFAULT_LAT || 41.688908);
@@ -191,7 +191,11 @@ export async function runCrawlLoop(
     }
   }
 
-  await emit(db, `crawl loop started (${owner})`, "info", { max_places: state0.max_places });
+  await queueNextDiscoveryCells(db, 24);
+
+  if (!opts.quiet) {
+    await emit(db, `crawl loop started (${owner})`, "info", { max_places: state0.max_places });
+  }
 
   let steps = 0;
   let idle = 0;
@@ -200,66 +204,71 @@ export async function runCrawlLoop(
     const result = await processOneJob(env, owner);
     if (result === "paused") return { steps, stopped: "paused" };
     if (result === "idle") {
-      idle += 1;
-      const pending = await db.prepare(
-        "SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'",
-      ).first<{ n: number }>();
-      if ((pending?.n ?? 0) === 0) {
+      await queueNextDiscoveryCells(db, 24);
+      if (!(await crawlWorkRemaining(db))) {
         await advancePass(db);
         const state = await getState(db);
         if (state.paused && !state.pass_mode) {
           await emit(db, "queue empty — crawl loop stopping");
           return { steps, stopped: "empty" };
         }
+        if (!(await crawlWorkRemaining(db))) {
+          return { steps, stopped: "empty" };
+        }
       }
-      if (idle >= 5) return { steps, stopped: "idle" };
-      await sleep(200);
+      idle += 1;
+      if (idle >= 8) return { steps, stopped: "idle" };
+      await sleep(50);
       continue;
     }
     idle = 0;
     steps += 1;
   }
 
-  await emit(db, deadline != null && Date.now() >= deadline ? `crawl loop time budget (${opts.maxMs}ms)` : `crawl loop hit maxSteps=${maxSteps}`);
+  if (!opts.quiet && steps > 0) {
+    await emit(
+      db,
+      deadline != null && Date.now() >= deadline
+        ? `crawl burst ${steps} jobs (${opts.maxMs}ms)`
+        : `crawl loop hit maxSteps=${maxSteps} (${steps} jobs)`,
+    );
+  }
   return { steps, stopped: deadline != null && Date.now() >= deadline ? "time_budget" : "max_steps" };
   } finally {
     await releaseCrawlLease(db, owner);
   }
 }
 
-const CRAWL_BURST_MS = 25_000;
+const CRAWL_BURST_MS = 28_000;
 
-async function pendingJobCount(db: D1Database): Promise<number> {
-  const row = await db
-    .prepare("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'")
-    .first<{ n: number }>();
-  return row?.n ?? 0;
-}
-
-/** Kick another Worker invocation so scraping continues past the ~30s free-tier wall. */
-export async function scheduleCrawlChain(env: Env, ctx: ExecutionContext, result: { stopped: string }): Promise<void> {
-  if (result.stopped !== "time_budget" && result.stopped !== "max_steps") return;
+/** Kick another Worker invocation whenever work remains (not just on time budget). */
+export async function scheduleCrawlChain(
+  env: Env,
+  ctx: ExecutionContext,
+  result: { stopped: string },
+): Promise<void> {
+  if (result.stopped === "paused" || result.stopped === "empty") return;
 
   const db = writeDb(env);
-  const state = await getState(db);
-  if (state.paused || state.storage_handbrake) return;
-  if ((await pendingJobCount(db)) === 0) return;
+  if (!(await crawlWorkRemaining(db))) return;
 
   const secret = env.CRAWL_CHAIN_SECRET;
   if (!secret) return;
 
   const base = (env.TILES_PUBLIC_URL || "https://park5night.hyperreader.eu").replace(/\/$/, "");
-  await fetch(`${base}/api/internal/crawl-chain`, {
-    method: "POST",
-    headers: { "X-Crawl-Chain": secret },
-  }).catch(() => undefined);
+  ctx.waitUntil(
+    fetch(`${base}/api/internal/crawl-chain`, {
+      method: "POST",
+      headers: { "X-Crawl-Chain": secret },
+    }).catch(() => undefined),
+  );
 }
 
 /** One burst of jobs, then chain another invocation if work remains. */
 export async function runCrawlBurst(
   env: Env,
   ctx: ExecutionContext,
-  opts: { seed?: boolean; owner?: string } = {},
+  opts: { seed?: boolean; owner?: string; quiet?: boolean } = {},
 ): Promise<{ steps: number; stopped: string }> {
   const owner = opts.owner ?? `burst-${crypto.randomUUID().slice(0, 8)}`;
   const result = await runCrawlLoop(env, {
@@ -267,6 +276,7 @@ export async function runCrawlBurst(
     maxSteps: 500,
     maxMs: CRAWL_BURST_MS,
     owner,
+    quiet: opts.quiet ?? false,
   });
   await scheduleCrawlChain(env, ctx, result);
   return result;

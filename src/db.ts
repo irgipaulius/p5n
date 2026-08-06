@@ -143,7 +143,41 @@ export async function enqueueJobsBatch(
   return items.length;
 }
 
-export async function claimJob(db: D1Database, owner: string, leaseSeconds = 120): Promise<JobRow | null> {
+/** (Re)queue filter_cell jobs — revives done/error rows for cells still pending. */
+export async function enqueueFilterCellJobs(
+  db: D1Database,
+  items: { id: string; payload: Record<string, unknown> }[],
+): Promise<number> {
+  if (items.length === 0) return 0;
+  const t = nowIso();
+  let n = 0;
+  for (let i = 0; i < items.length; i += 12) {
+    const slice = items.slice(i, i + 12);
+    await db.batch(
+      slice.map((item) =>
+        db
+          .prepare(
+            `INSERT INTO jobs (id, kind, payload_json, status, attempts, created_at, updated_at)
+             VALUES (?, 'filter_cell', ?, 'pending', 0, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               payload_json = excluded.payload_json,
+               status = 'pending',
+               attempts = 0,
+               last_error = NULL,
+               lease_owner = NULL,
+               lease_until = NULL,
+               updated_at = excluded.updated_at
+             WHERE jobs.status IN ('done', 'error')`,
+          )
+          .bind(item.id, JSON.stringify(item.payload), t, t),
+      ),
+    );
+    n += slice.length;
+  }
+  return n;
+}
+
+export async function claimJob(db: D1Database, owner: string, leaseSeconds = 60): Promise<JobRow | null> {
   const state = await getState(db);
   if (state.paused || state.storage_handbrake) return null;
 
@@ -610,9 +644,29 @@ export async function checkStorageHandbrake(db: D1Database): Promise<boolean> {
 }
 
 export async function advancePass(db: D1Database): Promise<void> {
-  await queueNextDiscoveryCells(db, 5);
+  await queueNextDiscoveryCells(db, 24);
   await maybeCompletePass(db);
   await checkStorageHandbrake(db);
+}
+
+/** True while Europe pass or job queue still has work. */
+export async function crawlWorkRemaining(db: D1Database): Promise<boolean> {
+  const state = await getState(db);
+  if (state.paused || state.storage_handbrake) return false;
+
+  const activeJobs = await db
+    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending', 'running')`)
+    .first<{ n: number }>();
+  if ((activeJobs?.n ?? 0) > 0) return true;
+
+  const passId = state.pass_id || 0;
+  if (!passId || !state.pass_mode || state.continuous_paused) return false;
+
+  const pendingCells = await db
+    .prepare(`SELECT COUNT(*) AS n FROM discovery_cells WHERE pass_id = ? AND status = 'pending'`)
+    .bind(passId)
+    .first<{ n: number }>();
+  return (pendingCells?.n ?? 0) > 0;
 }
 
 export async function reviewsFetched(db: D1Database, placeId: string): Promise<boolean> {
@@ -965,7 +1019,7 @@ export async function startPass(
   return { passId, cells: cells.length };
 }
 
-export async function queueNextDiscoveryCells(db: D1Database, limit = 3): Promise<number> {
+export async function queueNextDiscoveryCells(db: D1Database, limit = 50): Promise<number> {
   const state = await getState(db);
   if (state.continuous_paused) return 0;
   const passId = state.pass_id || 0;
@@ -986,17 +1040,17 @@ export async function queueNextDiscoveryCells(db: D1Database, limit = 3): Promis
     .bind(passId, need)
     .all<{ id: string; lat: number; lng: number }>();
 
-  let n = 0;
-  for (const c of cells.results ?? []) {
-    await enqueueJob(
-      db,
-      "filter_cell",
-      { lat: c.lat, lng: c.lng, cell_id: c.id, pass_id: passId, mode: state.pass_mode },
-      `filter:${passId}:${c.id}`,
-    );
-    n += 1;
-  }
-  return n;
+  const jobs = (cells.results ?? []).map((c) => ({
+    id: `filter:${passId}:${c.id}`,
+    payload: {
+      lat: c.lat,
+      lng: c.lng,
+      cell_id: c.id,
+      pass_id: passId,
+      mode: state.pass_mode,
+    },
+  }));
+  return enqueueFilterCellJobs(db, jobs);
 }
 
 export async function markCellDone(

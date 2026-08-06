@@ -2,6 +2,7 @@ import { handleCrawlChainRequest, runCrawlBurst, runCrawlLoop, runCrawlLoopUntil
 import {
   bumpMaxPlaces,
   commentsUrl,
+  crawlWorkRemaining,
   emit,
   enqueueJob,
   eventsSince,
@@ -256,9 +257,18 @@ export default {
     const db = writeDb(env);
     const state = await getState(db);
     if (state.paused || state.storage_handbrake) return;
-    const owner = `cron-${Date.now()}`;
-    if (!(await tryAcquireCrawlLease(db, owner, 55))) return;
-    ctx.waitUntil(runCrawlBurst(env, ctx, { owner }));
+    await reclaimStaleLeases(db);
+    if (!(await crawlWorkRemaining(db))) return;
+
+    const secret = env.CRAWL_CHAIN_SECRET;
+    if (!secret) return;
+    const base = (env.TILES_PUBLIC_URL || "https://park5night.hyperreader.eu").replace(/\/$/, "");
+    ctx.waitUntil(
+      fetch(`${base}/api/internal/crawl-chain`, {
+        method: "POST",
+        headers: { "X-Crawl-Chain": secret },
+      }).catch(() => undefined),
+    );
   },
 } satisfies ExportedHandler<Env>;
 
