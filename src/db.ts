@@ -1225,6 +1225,18 @@ export async function releaseCrawlLease(db: D1Database, owner: string): Promise<
     .run();
 }
 
+export async function reclaimCrawlLease(db: D1Database): Promise<boolean> {
+  const now = Date.now() / 1000;
+  const res = await db
+    .prepare(
+      `UPDATE crawler_state SET crawl_lease_owner = NULL, crawl_lease_until = NULL, updated_at = ?
+       WHERE id = 1 AND crawl_lease_until IS NOT NULL AND crawl_lease_until <= ?`,
+    )
+    .bind(nowIso(), now)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
 function outboundGapMs(env: Env, state: CrawlerState, url: string): number {
   const base = rateLimitMs(env, state);
   // Filter responses carry hundreds of pins each — keep calls moving, still one at a time globally.

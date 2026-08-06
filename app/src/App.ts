@@ -116,9 +116,11 @@ export function mountApp(root: HTMLElement): void {
     await p5n.tryOfflineFirst();
     await p5n.initTilesFromManifest();
     p5n.watchSystemTheme();
+    const view = await p5n.resolveInitialView();
+    p5n.onMoveEndLoadPins();
     p5n.onMoveEndEnrich();
-    const n = await p5n.loadExistingPins();
-    statusEl.textContent = n ? `${n} pins` : "ready";
+    const n = await p5n.loadViewportPins();
+    statusEl.textContent = n ? `${n} pins nearby` : view.source === "gps" ? "ready" : "ready — pan to explore";
     p5n.filterTypes([...selectedTypes]);
     await refreshStats();
     await loadAttributes();
@@ -213,6 +215,7 @@ export function mountApp(root: HTMLElement): void {
     p5n.clearFilteredPins();
     p5n.filterTypes(selectedTypes.size ? [...selectedTypes] : []);
     searchMeta.textContent = "";
+    void p5n.loadViewportPins();
   }
 
   async function applyAllFilters(): Promise<void> {
@@ -391,7 +394,7 @@ export function mountApp(root: HTMLElement): void {
   });
   es.addEventListener("place", (ev) => {
     const pin = JSON.parse((ev as MessageEvent).data) as PinFeature;
-    p5n.addLivePin(pin);
+    if (!p5n.addLivePinIfVisible(pin)) return;
     statusEl.textContent = `+ ${pin.name ?? pin.id}`;
   });
   es.addEventListener("stats", (ev) => {

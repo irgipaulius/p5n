@@ -17,6 +17,26 @@ export function parseBbox(url: URL): { west: number; south: number; east: number
   };
 }
 
+export function handleIpGeo(request: Request): Response {
+  const cf = request.cf as
+    | { latitude?: string; longitude?: string; city?: string; country?: string }
+    | undefined;
+  if (cf?.latitude && cf?.longitude) {
+    const lat = Number(cf.latitude);
+    const lng = Number(cf.longitude);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return json({
+        lat,
+        lng,
+        city: cf.city ?? null,
+        country: cf.country ?? null,
+        source: "ip",
+      });
+    }
+  }
+  return json({ lat: 50, lng: 10, city: null, country: null, source: "default" });
+}
+
 export async function handleBboxPins(env: Env, url: URL): Promise<Response> {
   const bbox = parseBbox(url);
   if (!bbox) return json({ error: "bbox required: west,south,east,north" }, 400);

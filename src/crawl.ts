@@ -15,6 +15,7 @@ import {
   placesCount,
   planAndEnqueueFilterIngest,
   queueNextDiscoveryCells,
+  reclaimCrawlLease,
   reclaimStaleLeases,
   refreshKnownPlace,
   releaseCrawlLease,
@@ -169,9 +170,10 @@ export async function runCrawlLoop(
 
   const reclaimed = await reclaimStaleLeases(db);
   if (reclaimed) await emit(db, `reclaimed ${reclaimed} stale lease(s)`);
+  if (await reclaimCrawlLease(db)) await emit(db, "reclaimed expired crawl lease", "info");
 
   const owner = opts.owner ?? `worker-${crypto.randomUUID().slice(0, 8)}`;
-  if (!(await tryAcquireCrawlLease(db, owner, 40))) {
+  if (!(await tryAcquireCrawlLease(db, owner, 35))) {
     return { steps: 0, stopped: "no_lease" };
   }
   const maxSteps = opts.maxSteps ?? 200;
@@ -239,7 +241,23 @@ export async function runCrawlLoop(
   }
 }
 
-const CRAWL_BURST_MS = 28_000;
+const CRAWL_BURST_MS = 22_000;
+
+function chainRequest(env: Env, ctx: ExecutionContext): void {
+  const secret = env.CRAWL_CHAIN_SECRET;
+  if (!secret) return;
+  const req = new Request("https://crawl.internal/api/internal/crawl-chain", {
+    method: "POST",
+    headers: { "X-Crawl-Chain": secret },
+  });
+  const p = env.SELF
+    ? env.SELF.fetch(req)
+    : fetch(`${(env.TILES_PUBLIC_URL || "https://park5night.hyperreader.eu").replace(/\/$/, "")}/api/internal/crawl-chain`, {
+        method: "POST",
+        headers: { "X-Crawl-Chain": secret },
+      });
+  ctx.waitUntil(p.catch(() => undefined));
+}
 
 /** Kick another Worker invocation whenever work remains (not just on time budget). */
 export async function scheduleCrawlChain(
@@ -250,18 +268,15 @@ export async function scheduleCrawlChain(
   if (result.stopped === "paused" || result.stopped === "empty") return;
 
   const db = writeDb(env);
+  if (result.stopped === "no_lease") await reclaimCrawlLease(db);
   if (!(await crawlWorkRemaining(db))) return;
 
-  const secret = env.CRAWL_CHAIN_SECRET;
-  if (!secret) return;
+  chainRequest(env, ctx);
+}
 
-  const base = (env.TILES_PUBLIC_URL || "https://park5night.hyperreader.eu").replace(/\/$/, "");
-  ctx.waitUntil(
-    fetch(`${base}/api/internal/crawl-chain`, {
-      method: "POST",
-      headers: { "X-Crawl-Chain": secret },
-    }).catch(() => undefined),
-  );
+/** Start the self-chaining crawl driver (one burst per HTTP invocation). */
+export function kickCrawlChain(env: Env, ctx: ExecutionContext): void {
+  chainRequest(env, ctx);
 }
 
 /** One burst of jobs, then chain another invocation if work remains. */
@@ -287,12 +302,8 @@ export async function handleCrawlChainRequest(request: Request, env: Env, ctx: E
     return new Response(JSON.stringify({ error: "forbidden" }), { status: 403, headers: { "content-type": "application/json" } });
   }
   const owner = `chain-${Date.now()}`;
-  ctx.waitUntil(
-    (async () => {
-      await runCrawlBurst(env, ctx, { owner });
-    })(),
-  );
-  return new Response(JSON.stringify({ ok: true, started: true }), {
+  const result = await runCrawlBurst(env, ctx, { owner, quiet: true });
+  return new Response(JSON.stringify({ ok: true, ...result }), {
     headers: { "content-type": "application/json" },
   });
 }

@@ -2,7 +2,9 @@ import type maplibregl from "maplibre-gl";
 import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
+import { resolveInitialView, type InitialView } from "./geo/initial-view";
 import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setTypeFilter } from "./layers/pins";
+import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins } from "./pins/viewport-pins";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -112,21 +114,44 @@ export class P5nMap {
     src.setData({ type: "FeatureCollection", features: [...this.deltaFeatures] });
   }
 
-  async loadExistingPins(): Promise<number> {
-    const resp = await fetch(`${this.config.apiBase}/api/places/geo`);
-    if (!resp.ok) return 0;
-    const pins = (await resp.json()) as PinFeature[];
-    for (const pin of pins) this.addLivePin(pin);
-    if (pins.length > 0) {
-      const lngs = pins.map((p) => p.lng);
-      const lats = pins.map((p) => p.lat);
-      const bounds: maplibregl.LngLatBoundsLike = [
-        [Math.min(...lngs), Math.min(...lats)],
-        [Math.max(...lngs), Math.max(...lats)],
-      ];
-      this.map.fitBounds(bounds, { padding: 60, maxZoom: 10, duration: 0 });
-    }
+  async loadViewportPins(): Promise<number> {
+    const pins = await fetchViewportPins(this.config.apiBase, this.map);
+    this.setDeltaPins(pins);
     return pins.length;
+  }
+
+  /** @deprecated Use loadViewportPins — loads only pins in the current map view. */
+  async loadExistingPins(): Promise<number> {
+    return this.loadViewportPins();
+  }
+
+  setDeltaPins(pins: PinFeature[]): void {
+    this.deltaFeatures = pins.map((p) => this.pinFeature(p));
+    this.flushDeltaPins();
+  }
+
+  /** IP geolocation first, then browser location prompt; centers the map. */
+  async resolveInitialView(): Promise<InitialView> {
+    return resolveInitialView(this.map, this.config.apiBase);
+  }
+
+  isPinInView(pin: { lat: number; lng: number }): boolean {
+    return pinInBbox(pin, expandedBbox(this.map, 0));
+  }
+
+  onMoveEndLoadPins(): void {
+    this.map.on("moveend", () => {
+      if (this.filterMode) return;
+      scheduleViewportPins(this.map, this.config.apiBase, (pins) => {
+        this.setDeltaPins(pins);
+      });
+    });
+  }
+
+  addLivePinIfVisible(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): boolean {
+    if (!this.isPinInView(pin)) return false;
+    this.addLivePin(pin);
+    return true;
   }
 
   async initTilesFromManifest(): Promise<void> {

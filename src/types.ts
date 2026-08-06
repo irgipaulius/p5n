@@ -10,6 +10,8 @@ export interface Env {
   USE_D1_SESSIONS?: string;
   /** Shared secret for worker self-chain bursts (keeps crawl running past 30s free-tier limit). */
   CRAWL_CHAIN_SECRET?: string;
+  /** Service binding for reliable self-invocation (optional). */
+  SELF?: Fetcher;
 }
 
 /** Job kinds — claim order prefers ingest chunks, then discovery, then refresh/reviews. */

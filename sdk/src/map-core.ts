@@ -60,7 +60,7 @@ export function createMap(container: HTMLElement, config: P5nConfig): maplibregl
     container,
     style: basemapStyle(config.dark ?? true),
     center: [10, 50],
-    zoom: 4,
+    zoom: 5,
     maxPitch: 60,
     antialias: false,
     fadeDuration: 0,

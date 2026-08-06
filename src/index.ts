@@ -1,4 +1,4 @@
-import { handleCrawlChainRequest, runCrawlBurst, runCrawlLoop, runCrawlLoopUntilPaused } from "./crawl";
+import { handleCrawlChainRequest, kickCrawlChain, runCrawlBurst, runCrawlLoop } from "./crawl";
 import {
   bumpMaxPlaces,
   commentsUrl,
@@ -20,6 +20,7 @@ import {
   queueNextDiscoveryCells,
   readDb,
   recentEvents,
+  reclaimCrawlLease,
   reclaimStaleLeases,
   reviewsFetched,
   setContinuousPaused,
@@ -32,6 +33,7 @@ import {
   handleAttributes,
   handleBboxPins,
   handleEnrich,
+  handleIpGeo,
   handleStreamingSearch,
   handleTileManifest,
 } from "./geo-api";
@@ -65,6 +67,10 @@ export default {
 
       if (request.method === "GET" && pathname === "/api/pins/bbox") {
         return handleBboxPins(env, url);
+      }
+
+      if (request.method === "GET" && pathname === "/api/geo/ip") {
+        return handleIpGeo(request);
       }
 
       if (request.method === "GET" && pathname === "/api/enrich") {
@@ -133,7 +139,7 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/scrape/start") {
         const result = await startScrape(env);
-        ctx.waitUntil(runCrawlLoopUntilPaused(env, ctx));
+        kickCrawlChain(env, ctx);
         await emit(
           writeDb(env),
           result.resumed
@@ -151,7 +157,7 @@ export default {
 
       if (request.method === "POST" && pathname === "/api/scrape/resume") {
         const result = await resumeScrape(env);
-        ctx.waitUntil(runCrawlLoopUntilPaused(env, ctx));
+        kickCrawlChain(env, ctx);
         await emit(writeDb(env), "scrape resumed");
         return json({ ok: true, ...result });
       }
@@ -160,7 +166,7 @@ export default {
         const state = await getState(readDb(env));
         if (state.paused) {
           const result = await resumeScrape(env);
-          ctx.waitUntil(runCrawlLoopUntilPaused(env, ctx));
+          kickCrawlChain(env, ctx);
           await emit(writeDb(env), "scrape resumed");
           return json({ ok: true, ...result, action: "resume" });
         }
@@ -258,17 +264,9 @@ export default {
     const state = await getState(db);
     if (state.paused || state.storage_handbrake) return;
     await reclaimStaleLeases(db);
+    await reclaimCrawlLease(db);
     if (!(await crawlWorkRemaining(db))) return;
-
-    const secret = env.CRAWL_CHAIN_SECRET;
-    if (!secret) return;
-    const base = (env.TILES_PUBLIC_URL || "https://park5night.hyperreader.eu").replace(/\/$/, "");
-    ctx.waitUntil(
-      fetch(`${base}/api/internal/crawl-chain`, {
-        method: "POST",
-        headers: { "X-Crawl-Chain": secret },
-      }).catch(() => undefined),
-    );
+    kickCrawlChain(env, ctx);
   },
 } satisfies ExportedHandler<Env>;
 

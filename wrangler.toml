@@ -11,6 +11,10 @@ DEFAULT_LNG = "19.641004"
 TILES_PUBLIC_URL = "https://park5night.hyperreader.eu"
 CRAWL_CHAIN_SECRET = "p5n-chain-7f3a9c2e1b8d4f6a"
 
+[[services]]
+binding = "SELF"
+service = "p5n"
+
 # Set USE_D1_SESSIONS=1 in Cloudflare dashboard for production read replicas.
 
 [[d1_databases]]
