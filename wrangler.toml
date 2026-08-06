@@ -23,10 +23,11 @@ database_name = "p5n"
 database_id = "5aa08f10-82e4-4ab3-9615-009b5c6540d7"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "TILES"
-bucket_name = "p5n-tiles"
-preview_bucket_name = "p5n-tiles-preview"
+# R2 — enable in Cloudflare Dashboard (R2 → Get started), then uncomment:
+# [[r2_buckets]]
+# binding = "TILES"
+# bucket_name = "p5n-tiles"
+# preview_bucket_name = "p5n-tiles-preview"
 
 [assets]
 directory = "./app/dist"
