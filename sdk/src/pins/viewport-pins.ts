@@ -30,7 +30,8 @@ export function pinInBbox(
   );
 }
 
-const MAX_TILES_PER_REQUEST = 40;
+const MAX_TILES_PER_REQUEST = 96;
+const MAX_PARALLEL_REQUESTS = 8;
 
 export async function fetchViewportPins(apiBase: string, map: maplibregl.Map): Promise<PinFeature[]> {
   const { west, south, east, north } = expandedBbox(map);
@@ -47,20 +48,38 @@ export async function fetchViewportPins(apiBase: string, map: maplibregl.Map): P
   return data.pins ?? [];
 }
 
-async function fetchPinTiles(apiBase: string, g4cells: string[]): Promise<Record<string, PinFeature[]>> {
-  const merged: Record<string, PinFeature[]> = {};
+async function fetchPinTileChunk(
+  apiBase: string,
+  chunk: string[],
+): Promise<Record<string, PinFeature[]>> {
+  const params = new URLSearchParams({ g4: chunk.join(",") });
+  const resp = await fetch(`${apiBase}/api/pins/tiles?${params}`);
+  if (!resp.ok) return {};
+  const data = (await resp.json()) as { tiles?: Record<string, PinFeature[]> };
+  return data.tiles ?? {};
+}
+
+async function fetchPinTiles(
+  apiBase: string,
+  g4cells: string[],
+  onChunk?: (tiles: Record<string, PinFeature[]>) => void,
+): Promise<Record<string, PinFeature[]>> {
+  const chunks: string[][] = [];
   for (let i = 0; i < g4cells.length; i += MAX_TILES_PER_REQUEST) {
-    const chunk = g4cells.slice(i, i + MAX_TILES_PER_REQUEST);
-    const params = new URLSearchParams({ g4: chunk.join(",") });
-    const resp = await fetch(`${apiBase}/api/pins/tiles?${params}`);
-    if (!resp.ok) continue;
-    const data = (await resp.json()) as { tiles?: Record<string, PinFeature[]> };
-    if (data.tiles) {
-      for (const [g4, pins] of Object.entries(data.tiles)) {
-        merged[g4] = pins;
-      }
+    chunks.push(g4cells.slice(i, i + MAX_TILES_PER_REQUEST));
+  }
+
+  const merged: Record<string, PinFeature[]> = {};
+
+  for (let i = 0; i < chunks.length; i += MAX_PARALLEL_REQUESTS) {
+    const wave = chunks.slice(i, i + MAX_PARALLEL_REQUESTS);
+    const results = await Promise.all(wave.map((chunk) => fetchPinTileChunk(apiBase, chunk)));
+    for (const tiles of results) {
+      for (const [g4, pins] of Object.entries(tiles)) merged[g4] = pins;
+      if (onChunk && Object.keys(tiles).length > 0) onChunk(tiles);
     }
   }
+
   return merged;
 }
 
@@ -69,14 +88,17 @@ export async function syncViewportPins(
   apiBase: string,
   map: maplibregl.Map,
   cache: PinSessionCache,
+  onProgress?: () => void,
 ): Promise<{ visible: number; fetched: number; cached: number }> {
   const bbox = expandedBbox(map);
   const cells = geohash4CellsForBbox(bbox);
   const missing = cache.missingTiles(cells);
 
   if (missing.length > 0) {
-    const tiles = await fetchPinTiles(apiBase, missing);
-    cache.mergeTiles(tiles);
+    await fetchPinTiles(apiBase, missing, (tiles) => {
+      cache.mergeTiles(tiles);
+      onProgress?.();
+    });
   }
 
   const visible = cache.pinsInBbox(bbox);
@@ -96,9 +118,12 @@ export function scheduleViewportPins(
   onPins(cache.pinsInBbox(bbox), { fromCache: true });
 
   if (loadTimer) clearTimeout(loadTimer);
+  const delay = cache.size === 0 ? 0 : delayMs;
   loadTimer = setTimeout(() => {
-    void syncViewportPins(apiBase, map, cache).then(() => {
+    void syncViewportPins(apiBase, map, cache, () => {
+      onPins(cache.pinsInBbox(expandedBbox(map)), { fromCache: false });
+    }).then(() => {
       onPins(cache.pinsInBbox(expandedBbox(map)), { fromCache: false });
     });
-  }, delayMs);
+  }, delay);
 }

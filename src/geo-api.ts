@@ -51,7 +51,7 @@ export async function handleTilePins(env: Env, url: URL): Promise<Response> {
   const raw = url.searchParams.get("g4") ?? "";
   const tiles = [...new Set(raw.split(",").map((s) => s.trim()).filter((s) => /^[0-9b-hj-km-np-z]{4}$/.test(s)))];
   if (tiles.length === 0) return json({ error: "g4 required: comma-separated geohash4 tiles" }, 400);
-  if (tiles.length > 48) return json({ error: "max 48 tiles per request" }, 400);
+  if (tiles.length > 120) return json({ error: "max 120 tiles per request" }, 400);
 
   const grouped = await listPlacesGroupedByGeohash4(env, tiles);
   let count = 0;

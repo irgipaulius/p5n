@@ -119,8 +119,9 @@ export class P5nMap {
   }
 
   async loadViewportPins(): Promise<number> {
-    const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache);
-    this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
+    const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
+    const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
+    refresh();
     return visible;
   }
 
