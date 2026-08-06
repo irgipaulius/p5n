@@ -41,10 +41,13 @@ import {
 import { buildEuropeGrid } from "./placeTypes";
 import { pauseScrape, resumeScrape, startScrape } from "./scrape";
 import { getTileBakeStatus, listTileChunks, runTileBake, startTileBake } from "./tile-bake";
+import { ensureSchema } from "./schema-ensure";
 import type { CommentApi, Env } from "./types";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    await ensureSchema(writeDb(env));
+
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -290,6 +293,7 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const db = writeDb(env);
+    await ensureSchema(db);
     const state = await getState(db);
     if (state.paused || state.storage_handbrake) return;
     await reclaimStaleLeases(db);
@@ -303,6 +307,8 @@ export default {
 function sseStream(env: Env): Response {
   let closed = false;
   const geoCursor = { at: new Date(0).toISOString(), id: "" };
+  let lastFullStatsAt = 0;
+  const FULL_STATS_MS = 30_000;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -319,6 +325,7 @@ function sseStream(env: Env): Response {
       let afterEvent = await maxEventId(writeDb(env));
       send("hello", { geoCursor, afterEvent });
       send("stats", await getStats(writeDb(env)));
+      lastFullStatsAt = Date.now();
 
       while (!closed) {
         try {
@@ -345,13 +352,16 @@ function sseStream(env: Env): Response {
             send("log", e);
           }
 
+          const now = Date.now();
           if (places.length || evs.length) {
-            send("stats", await getStats(writeDb(env)));
+            const lite = now - lastFullStatsAt < FULL_STATS_MS;
+            send("stats", await getStats(writeDb(env), { lite }));
+            if (!lite) lastFullStatsAt = now;
           } else {
-            send("ping", { t: Date.now() });
+            send("ping", { t: now });
           }
 
-          await new Promise((r) => setTimeout(r, places.length ? 100 : 500));
+          await new Promise((r) => setTimeout(r, places.length ? 100 : 2000));
         } catch (err) {
           send("error", { message: err instanceof Error ? err.message : String(err) });
           await new Promise((r) => setTimeout(r, 500));

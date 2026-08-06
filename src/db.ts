@@ -677,14 +677,12 @@ export async function reviewsFetched(db: D1Database, placeId: string): Promise<b
   return !!row?.reviews_fetched;
 }
 
-export async function getStats(db: D1Database) {
+export async function getStats(db: D1Database, opts: { lite?: boolean } = {}) {
   const state = await getState(db);
   const jobs = await db
     .prepare("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     .all<{ status: string; n: number }>();
-  const known = await placesCount(db);
-  const reviewCount =
-    (await db.prepare("SELECT COUNT(*) AS n FROM reviews").first<{ n: number }>())?.n ?? 0;
+  const known = state.places_crawled;
   const tileManifest = await db.prepare("SELECT * FROM tile_manifest WHERE id = 1").first();
 
   const jobMap: Record<string, number> = {};
@@ -700,7 +698,12 @@ export async function getStats(db: D1Database) {
     total: 0,
   }));
 
-  const dbBytes = await measureDbBytes(db);
+  let reviewCount = 0;
+  let dbBytes = Math.round(known * 11_000);
+  if (!opts.lite) {
+    reviewCount = (await db.prepare("SELECT COUNT(*) AS n FROM reviews").first<{ n: number }>())?.n ?? 0;
+    dbBytes = await measureDbBytes(db);
+  }
 
   return {
     state,

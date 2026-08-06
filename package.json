@@ -12,7 +12,7 @@
     "dev": "wrangler dev",
     "dev:app": "npm run dev -w @p5n/app",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:app\"",
-    "deploy": "npm run app:build && wrangler deploy",
+    "deploy": "npm run app:build && wrangler d1 migrations apply p5n --remote && wrangler deploy",
     "app:build": "npm run build -w @p5n/app",
     "app:dev": "npm run dev -w @p5n/app",
     "tiles:export": "npm run export -w @p5n/tiles",

@@ -21,8 +21,8 @@ Open http://localhost:5173 — scraper is **idle on startup**. Click **Start scr
 ## Deploy (park5night.hyperreader.eu)
 
 1. **Cloudflare dashboard** → Workers & Pages → Create → Connect GitHub → select `p5n` repo.
-2. Build command: `npm run app:build` · Deploy command: `npx wrangler deploy`
-3. **D1**: `npx wrangler d1 create p5n` → paste `database_id` into `wrangler.toml` → `npm run db:remote`
+2. Build command: `npm ci` · Deploy command: `npm run deploy` (applies D1 migrations, then ships the worker)
+3. **D1**: `npx wrangler d1 create p5n` → paste `database_id` into `wrangler.toml` (migrations apply automatically on deploy)
 4. **R2**: create bucket `p5n-tiles`, bind as `TILES` in wrangler.toml (already configured).
 5. **Custom domain**: Workers → p5n → Settings → Domains → add `park5night.hyperreader.eu` (zone `hyperreader.eu` must be on Cloudflare).
 6. **Cron**: enabled in `wrangler.toml` (`*/1 * * * *`) so scraping continues overnight without the dashboard open.
@@ -31,7 +31,6 @@ Open http://localhost:5173 — scraper is **idle on startup**. Click **Start scr
 Storage safety: scraper auto-pauses at **4.5 GB** D1 usage (dashboard shows live MB). If hit, schema is too thick — refactor before resuming.
 
 ```bash
-npm run app:build
 npm run deploy
 ```
 
@@ -159,7 +158,7 @@ See **Deploy (park5night.hyperreader.eu)** in Quick start above.
 ```bash
 npm run app:build
 npx wrangler d1 create p5n          # once — set database_id in wrangler.toml
-npm run db:remote
+npm run deploy
 npx wrangler deploy
 ```
 
