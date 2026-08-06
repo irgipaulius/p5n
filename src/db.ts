@@ -790,6 +790,32 @@ export async function listPlacesInBbox(
   return (res.results ?? []).map(rowToPin);
 }
 
+/** Pins grouped by geohash4 tile (for incremental client cache). */
+export async function listPlacesGroupedByGeohash4(
+  env: Env,
+  tiles: string[],
+): Promise<Record<string, PinGeo[]>> {
+  const grouped: Record<string, PinGeo[]> = {};
+  for (const t of tiles) grouped[t] = [];
+  if (tiles.length === 0) return grouped;
+
+  const placeholders = tiles.map(() => "?").join(",");
+  const res = await readDb(env)
+    .prepare(
+      `SELECT place_id, lat, lng, type, name, updated_at, geohash4 FROM places
+       WHERE geohash4 IN (${placeholders})`,
+    )
+    .bind(...tiles)
+    .all<PlaceRow & { geohash4: string }>();
+
+  for (const row of res.results ?? []) {
+    const g4 = row.geohash4;
+    if (!grouped[g4]) grouped[g4] = [];
+    grouped[g4].push(rowToPin(row));
+  }
+  return grouped;
+}
+
 export async function enrichPlaces(
   env: Env,
   west: number,

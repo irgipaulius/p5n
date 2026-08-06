@@ -36,6 +36,7 @@ import {
   handleIpGeo,
   handleStreamingSearch,
   handleTileManifest,
+  handleTilePins,
 } from "./geo-api";
 import { buildEuropeGrid } from "./placeTypes";
 import { pauseScrape, resumeScrape, startScrape } from "./scrape";
@@ -67,6 +68,10 @@ export default {
 
       if (request.method === "GET" && pathname === "/api/pins/bbox") {
         return handleBboxPins(env, url);
+      }
+
+      if (request.method === "GET" && pathname === "/api/pins/tiles") {
+        return handleTilePins(env, url);
       }
 
       if (request.method === "GET" && pathname === "/api/geo/ip") {

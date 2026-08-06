@@ -4,7 +4,8 @@ import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
 import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setSelectedPinFeature, setTypeFilter } from "./layers/pins";
-import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins } from "./pins/viewport-pins";
+import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins } from "./pins/viewport-pins";
+import { PinSessionCache } from "./pins/pin-cache";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -51,6 +52,7 @@ export class P5nMap {
   private selectedPin: { id: string; lat: number; lng: number; t: number } | null = null;
 
   private filteredFeatures: GeoJSON.Feature[] = [];
+  private pinCache = new PinSessionCache();
 
   private async attachSources(): Promise<void> {
     await registerPinIcons(this.map);
@@ -117,9 +119,9 @@ export class P5nMap {
   }
 
   async loadViewportPins(): Promise<number> {
-    const pins = await fetchViewportPins(this.config.apiBase, this.map);
-    this.setDeltaPins(pins);
-    return pins.length;
+    const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache);
+    this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
+    return visible;
   }
 
   /** @deprecated Use loadViewportPins — loads only pins in the current map view. */
@@ -153,7 +155,7 @@ export class P5nMap {
   onMoveEndLoadPins(): void {
     this.map.on("moveend", () => {
       if (this.filterMode) return;
-      scheduleViewportPins(this.map, this.config.apiBase, (pins) => {
+      scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
         this.setDeltaPins(pins);
       });
     });
@@ -162,8 +164,14 @@ export class P5nMap {
   addLivePinIfVisible(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): boolean {
     if (this.filterMode) return false;
     if (!this.isPinInView(pin)) return false;
+    this.pinCache.addPin(pin as PinFeature);
     this.addLivePin(pin);
     return true;
+  }
+
+  /** Pins held in this browser session (survives pan/zoom without refetch). */
+  cachedPinCount(): number {
+    return this.pinCache.size;
   }
 
   async initTilesFromManifest(): Promise<void> {
