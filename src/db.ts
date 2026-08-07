@@ -2,6 +2,14 @@ import { encodeAttributes, extractPhotoUrls, MAX_REVIEWS_PER_PLACE, photoCountFr
 import { labelForCode } from "../shared/place-types";
 import { compactEnrich, compactPin, type CompactEnrich, type CompactPin } from "../shared/pin-compact";
 import { readDb, writeDb } from "./db-session";
+import {
+  importCapHitFromPass,
+  pinGridDensity,
+  queryStats,
+  seedFrontierDiscoveryCells,
+  shouldSkipQuery,
+} from "./coverage";
+import { worldGridCellAt, worldGridCellCount } from "./discovery-grid";
 import { geohashPrefixes } from "./geohash";
 import type {
   AttributeDef,
@@ -45,7 +53,7 @@ export async function emit(
 export async function getState(db: D1Database): Promise<CrawlerState> {
   const row = await db.prepare("SELECT * FROM crawler_state WHERE id = 1").first<CrawlerState>();
   if (!row) throw new Error("crawler_state missing — run migrations");
-  return row;
+  return { ...row, gap_grid_index: row.gap_grid_index ?? 0 };
 }
 
 export async function setPaused(db: D1Database, paused: boolean): Promise<void> {
@@ -649,7 +657,7 @@ export async function advancePass(db: D1Database): Promise<void> {
   await checkStorageHandbrake(db);
 }
 
-/** True while Europe pass or job queue still has work. */
+/** True while a discovery pass or job queue still has work. */
 export async function crawlWorkRemaining(db: D1Database): Promise<boolean> {
   const state = await getState(db);
   if (state.paused || state.storage_handbrake) return false;
@@ -661,6 +669,10 @@ export async function crawlWorkRemaining(db: D1Database): Promise<boolean> {
 
   const passId = state.pass_id || 0;
   if (!passId || !state.pass_mode || state.continuous_paused) return false;
+
+  if (state.pass_mode === "world_gap") {
+    if ((state.gap_grid_index ?? 0) < worldGridCellCount()) return true;
+  }
 
   const pendingCells = await db
     .prepare(`SELECT COUNT(*) AS n FROM discovery_cells WHERE pass_id = ? AND status = 'pending'`)
@@ -695,7 +707,12 @@ export async function getStats(db: D1Database, opts: { lite?: boolean } = {}) {
     pending: 0,
     done: 0,
     error: 0,
+    skipped: 0,
     total: 0,
+    queries_run: 0,
+    queries_new_pins: 0,
+    gap_progress: 0,
+    gap_total: 0,
   }));
 
   let reviewCount = 0;
@@ -1100,8 +1117,139 @@ export async function startPass(
   return { passId, cells: cells.length };
 }
 
+/** Start worldwide gap-fill pass (lazy grid cursor + frontier seed). */
+export async function startWorldGapPass(db: D1Database): Promise<{
+  passId: number;
+  capImported: number;
+  frontier: number;
+}> {
+  const state = await getState(db);
+  const oldPassId = state.pass_id || 0;
+  const passId = oldPassId + 1;
+  const t = nowIso();
+
+  await db
+    .prepare(
+      `UPDATE crawler_state SET pass_id = ?, pass_mode = 'world_gap', continuous_paused = 0,
+       gap_grid_index = 0, max_places = ?, updated_at = ? WHERE id = 1`,
+    )
+    .bind(passId, 50_000_000, t)
+    .run();
+
+  let capImported = 0;
+  if (oldPassId > 0) {
+    capImported = await importCapHitFromPass(db, oldPassId, passId);
+  }
+  const frontier = await seedFrontierDiscoveryCells(db, passId);
+  return { passId, capImported, frontier };
+}
+
+export async function markCellSkipped(db: D1Database, passId: number, cellId: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE discovery_cells SET status = 'skipped', updated_at = ?
+       WHERE pass_id = ? AND id = ?`,
+    )
+    .bind(nowIso(), passId, cellId)
+    .run();
+}
+
+export async function queueGapDiscoveryJobs(db: D1Database, limit = 50): Promise<number> {
+  const state = await getState(db);
+  if (state.continuous_paused || state.pass_mode !== "world_gap") return 0;
+  const passId = state.pass_id || 0;
+  if (!passId) return 0;
+
+  const pendingJobs = await db
+    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending' AND kind = 'filter_cell'`)
+    .first<{ n: number }>();
+  if ((pendingJobs?.n ?? 0) >= limit) return 0;
+
+  let need = limit - (pendingJobs?.n ?? 0);
+  const jobs: { id: string; payload: Record<string, unknown> }[] = [];
+
+  const cells = await db
+    .prepare(
+      `SELECT id, lat, lng FROM discovery_cells
+       WHERE pass_id = ? AND status = 'pending'
+       ORDER BY CASE WHEN id LIKE 'cap:%' THEN 0 WHEN id LIKE 'frontier:%' THEN 1 ELSE 2 END, id ASC
+       LIMIT ?`,
+    )
+    .bind(passId, need * 3)
+    .all<{ id: string; lat: number; lng: number }>();
+
+  for (const c of cells.results ?? []) {
+    if (need <= 0) break;
+    if (await shouldSkipQuery(db, c.lat, c.lng)) {
+      await markCellSkipped(db, passId, c.id);
+      continue;
+    }
+    const density = await pinGridDensity(db, c.lat, c.lng);
+    jobs.push({
+      id: `filter:${passId}:${c.id}`,
+      payload: {
+        lat: c.lat,
+        lng: c.lng,
+        cell_id: c.id,
+        pass_id: passId,
+        mode: "new_only",
+        use_grid: c.id.startsWith("cap:"),
+        pin_density: density,
+      },
+    });
+    need -= 1;
+  }
+
+  let cursor = state.gap_grid_index ?? 0;
+  while (need > 0) {
+    const cell = worldGridCellAt(cursor);
+    if (!cell) break;
+    cursor += 1;
+
+    if (await shouldSkipQuery(db, cell.lat, cell.lng)) {
+      continue;
+    }
+
+    const density = await pinGridDensity(db, cell.lat, cell.lng);
+    jobs.push({
+      id: `filter:${passId}:world:${cell.id}`,
+      payload: {
+        lat: cell.lat,
+        lng: cell.lng,
+        cell_id: `world:${cell.id}`,
+        pass_id: passId,
+        mode: "new_only",
+        use_grid: false,
+        pin_density: density,
+      },
+    });
+    need -= 1;
+  }
+
+  if (cursor !== (state.gap_grid_index ?? 0)) {
+    await db.prepare("UPDATE crawler_state SET gap_grid_index = ?, updated_at = ? WHERE id = 1").bind(cursor, nowIso()).run();
+  }
+
+  if (jobs.length === 0) return 0;
+
+  for (const job of jobs) {
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO discovery_cells (id, pass_id, lat, lng, status, places_found, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', 0, ?)`,
+      )
+      .bind(String(job.payload.cell_id), passId, job.payload.lat, job.payload.lng, nowIso())
+      .run();
+  }
+
+  return enqueueFilterCellJobs(db, jobs);
+}
+
 export async function queueNextDiscoveryCells(db: D1Database, limit = 50): Promise<number> {
   const state = await getState(db);
+  if (state.pass_mode === "world_gap") {
+    return queueGapDiscoveryJobs(db, limit);
+  }
   if (state.continuous_paused) return 0;
   const passId = state.pass_id || 0;
   if (!passId || !state.pass_mode) return 0;
@@ -1164,7 +1312,20 @@ export async function passProgress(db: D1Database) {
   const state = await getState(db);
   const passId = state.pass_id || 0;
   if (!passId) {
-    return { pass_id: 0, mode: "", continuous_paused: true, pending: 0, done: 0, error: 0, total: 0 };
+    return {
+      pass_id: 0,
+      mode: "",
+      continuous_paused: true,
+      pending: 0,
+      done: 0,
+      error: 0,
+      skipped: 0,
+      total: 0,
+      queries_run: 0,
+      queries_new_pins: 0,
+      gap_progress: 0,
+      gap_total: 0,
+    };
   }
   const rows = await db
     .prepare(`SELECT status, COUNT(*) AS n FROM discovery_cells WHERE pass_id = ? GROUP BY status`)
@@ -1173,6 +1334,8 @@ export async function passProgress(db: D1Database) {
   const counts: Record<string, number> = {};
   for (const r of rows.results ?? []) counts[r.status] = r.n;
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const q = await queryStats(db, passId);
+  const gapTotal = state.pass_mode === "world_gap" ? worldGridCellCount() : 0;
   return {
     pass_id: passId,
     mode: state.pass_mode || "",
@@ -1180,7 +1343,12 @@ export async function passProgress(db: D1Database) {
     pending: counts.pending || 0,
     done: counts.done || 0,
     error: counts.error || 0,
+    skipped: counts.skipped || 0,
     total,
+    queries_run: q.queries_run,
+    queries_new_pins: q.queries_new_pins,
+    gap_progress: state.gap_grid_index ?? 0,
+    gap_total: gapTotal,
   };
 }
 
@@ -1194,6 +1362,9 @@ export async function maybeCompletePass(db: D1Database): Promise<boolean> {
     .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')`)
     .first<{ n: number }>();
   if (prog.pending === 0 && (pendingJobs?.n ?? 0) === 0) {
+    if (state.pass_mode === "world_gap" && (state.gap_grid_index ?? 0) < worldGridCellCount()) {
+      return false;
+    }
     await db
       .prepare(
         `UPDATE crawler_state SET paused = 1, continuous_paused = 1, pass_mode = '', updated_at = ? WHERE id = 1`,

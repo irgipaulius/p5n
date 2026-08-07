@@ -48,6 +48,7 @@ export interface CrawlerState {
   outbound_lock_until: number | null;
   crawl_lease_owner: string | null;
   crawl_lease_until: number | null;
+  gap_grid_index: number;
   updated_at: string;
 }
 

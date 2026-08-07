@@ -506,7 +506,17 @@ export function mountApp(root: HTMLElement): void {
       db_limit_mb?: number;
       jobs?: Record<string, number>;
       state?: { paused: number; storage_handbrake?: number; max_places: number };
-      pass?: { done: number; total: number; pending: number };
+      pass?: {
+        done: number;
+        total: number;
+        pending: number;
+        skipped?: number;
+        mode?: string;
+        queries_run?: number;
+        queries_new_pins?: number;
+        gap_progress?: number;
+        gap_total?: number;
+      };
       tile_manifest?: {
         version?: number;
         place_count?: number;
@@ -523,9 +533,11 @@ export function mountApp(root: HTMLElement): void {
     const limitMb = s.db_limit_mb ?? 4608;
     const dbClass = dbMb >= limitMb * 0.85 ? "stats-warn" : "";
     const passLine =
-      s.pass?.total && s.pass.total > 0
-        ? `<span>${s.pass.done}/${s.pass.total} cells</span>`
-        : "";
+      s.pass?.mode === "world_gap" && (s.pass.gap_total ?? 0) > 0
+        ? `<span title="${s.pass.queries_run ?? 0} queries, +${s.pass.queries_new_pins ?? 0} new">${s.pass.gap_progress ?? 0}/${s.pass.gap_total} grid · ${s.pass.queries_run ?? 0}q</span>`
+        : s.pass?.total && s.pass.total > 0
+          ? `<span>${s.pass.done}/${s.pass.total} cells${s.pass.skipped ? ` (${s.pass.skipped} skip)` : ""}</span>`
+          : "";
     const tm = s.tile_manifest;
     const gridCells = (tm as { grid_cells?: number })?.grid_cells ?? 0;
     const bakedLine =
@@ -542,7 +554,7 @@ export function mountApp(root: HTMLElement): void {
       statusEl.classList.add("status-error");
     } else if (!baking) {
       statusEl.classList.remove("status-error");
-      if (scraping) statusEl.textContent = "scraping";
+      if (scraping) statusEl.textContent = s.pass?.mode === "world_gap" ? "gap-fill" : "scraping";
       else if (s.pass?.total && s.pass.done === s.pass.total && !s.pass.pending) statusEl.textContent = "complete";
       else if (!p5n.hasBakedTiles()) statusEl.textContent = "idle";
     }

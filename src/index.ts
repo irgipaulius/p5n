@@ -180,8 +180,8 @@ export default {
         await emit(
           writeDb(env),
           result.resumed
-            ? `scrape resumed — pass #${result.pass_id}`
-            : `scrape started — Europe pass #${result.pass_id} (${result.cells} cells)`,
+            ? `scrape resumed — world gap-fill pass #${result.pass_id}`
+            : `scrape started — world gap-fill pass #${result.pass_id} (${result.cells} grid slots)`,
         );
         return json({ ok: true, ...result });
       }

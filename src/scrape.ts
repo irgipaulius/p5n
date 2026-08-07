@@ -8,19 +8,21 @@ import {
   reclaimStaleLeases,
   setContinuousPaused,
   setPaused,
-  startPass,
+  startWorldGapPass,
   writeDb,
 } from "./db";
-import { buildEuropeGrid } from "./placeTypes";
+import { worldGridCellCount } from "./discovery-grid";
 
-const EUROPE_PASS_CELLS = 24;
+const GAP_QUEUE_BATCH = 24;
 
-/** Start or resume the Europe-wide discovery pass (runs until all cells done). */
+/** Start or resume the worldwide gap-fill pass. */
 export async function startScrape(env: Env): Promise<{
   paused: boolean;
   pass_id: number;
   cells: number;
   resumed: boolean;
+  cap_imported?: number;
+  frontier?: number;
 }> {
   const db = writeDb(env);
   await reclaimStaleLeases(db);
@@ -31,33 +33,42 @@ export async function startScrape(env: Env): Promise<{
   }
 
   let passId = state.pass_id || 0;
-  let cellCount = 0;
+  let cellCount = worldGridCellCount();
   let resumed = false;
+  let capImported = 0;
+  let frontier = 0;
 
-  if (!passId || !state.pass_mode) {
-    const cells = buildEuropeGrid(1);
-    const started = await startPass(db, "new_only", cells);
+  if (!passId || state.pass_mode !== "world_gap") {
+    const started = await startWorldGapPass(db);
     passId = started.passId;
-    cellCount = started.cells;
-    await emit(db, `Europe scrape started — pass #${passId}, ${cellCount} grid cells`, "info", {
-      pass_id: passId,
-      cells: cellCount,
-    });
+    capImported = started.capImported;
+    frontier = started.frontier;
+    await emit(
+      db,
+      `World gap-fill started — pass #${passId}, ${cellCount} grid slots, ${frontier} frontier, ${capImported} cap-hit imported`,
+      "info",
+      { pass_id: passId, gap_total: cellCount, frontier, cap_imported: capImported },
+    );
   } else {
     resumed = true;
-    const prog = await db
-      .prepare("SELECT COUNT(*) AS n FROM discovery_cells WHERE pass_id = ?")
-      .bind(passId)
-      .first<{ n: number }>();
-    cellCount = prog?.n ?? 0;
     await setContinuousPaused(db, false);
-    await emit(db, `Europe scrape resumed — pass #${passId}`, "info", { pass_id: passId });
+    await emit(db, `World gap-fill resumed — pass #${passId}`, "info", {
+      pass_id: passId,
+      gap_progress: state.gap_grid_index ?? 0,
+    });
   }
 
   await setPaused(db, false);
-  await queueNextDiscoveryCells(db, EUROPE_PASS_CELLS);
+  await queueNextDiscoveryCells(db, GAP_QUEUE_BATCH);
 
-  return { paused: false, pass_id: passId, cells: cellCount, resumed };
+  return {
+    paused: false,
+    pass_id: passId,
+    cells: cellCount,
+    resumed,
+    cap_imported: capImported,
+    frontier,
+  };
 }
 
 export async function pauseScrape(env: Env): Promise<{ paused: boolean }> {
