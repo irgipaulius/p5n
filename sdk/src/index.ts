@@ -95,6 +95,7 @@ export class P5nMap {
   private deltaFeatureCount = -1;
   private manifestReady = false;
   private deltaClustered: boolean | null = null;
+  private deltaFlushPending = false;
 
   private pmtilesActive(): boolean {
     return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
@@ -127,9 +128,11 @@ export class P5nMap {
 
   private async waitForStyle(): Promise<void> {
     if (this.map.isStyleLoaded()) return;
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("style load timeout")), 10_000);
       const done = () => {
         if (!this.map.isStyleLoaded()) return;
+        clearTimeout(timer);
         this.map.off("styledata", done);
         this.map.off("load", done);
         resolve();
@@ -137,7 +140,7 @@ export class P5nMap {
       this.map.on("styledata", done);
       this.map.on("load", done);
       done();
-    });
+    }).catch(() => undefined);
   }
 
   /** Viewport pins: non-clustered overlay on PMTiles; clustered fallback without PMTiles. */
@@ -237,7 +240,14 @@ export class P5nMap {
   private flushDeltaPins(): void {
     const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
     if (!src) {
-      void this.ensureViewportPinLayers().then(() => this.flushDeltaPins());
+      if (this.deltaFlushPending) return;
+      this.deltaFlushPending = true;
+      void this.ensureViewportPinLayers()
+        .catch(() => undefined)
+        .finally(() => {
+          this.deltaFlushPending = false;
+        })
+        .then(() => this.flushDeltaPins());
       return;
     }
     const n = this.deltaFeatures.length;
