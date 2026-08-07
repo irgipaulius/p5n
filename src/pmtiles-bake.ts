@@ -63,10 +63,10 @@ function clusterFeaturesInTile(
   const grid = z <= 3 ? 512 : z <= 5 ? 256 : 128;
   const cells = new Map<string, { x: number; y: number; count: number }>();
   for (const f of features) {
-    const ring = f.geometry?.[0];
-    if (!ring?.length) continue;
-    const px = ring[0][0];
-    const py = ring[0][1];
+    const pt = f.geometry?.[0];
+    if (!pt?.length) continue;
+    const px = pt[0];
+    const py = pt[1];
     const cx = Math.floor(px / grid) * grid + grid / 2;
     const cy = Math.floor(py / grid) * grid + grid / 2;
     const key = `${cx},${cy}`;
