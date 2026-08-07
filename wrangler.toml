@@ -23,16 +23,11 @@ database_name = "p5n"
 database_id = "5aa08f10-82e4-4ab3-9615-009b5c6540d7"
 migrations_dir = "migrations"
 
-# Dashboard "Bake tiles" stores PMTiles in R2 when enabled, else D1 tile_blob.
-# R2 free tier: 10 GB storage + free egress — plenty for ~5–15 MB world PMTiles.
-# Enable once in Cloudflare Dashboard → R2 → Get started, then:
-#   npx wrangler r2 bucket create p5n-tiles
-#   npx wrangler r2 bucket create p5n-tiles-preview
-# Then uncomment:
-# [[r2_buckets]]
-# binding = "TILES"
-# bucket_name = "p5n-tiles"
-# preview_bucket_name = "p5n-tiles-preview"
+# PMTiles archive — dashboard Bake tiles uploads here (~5–15 MB world file).
+[[r2_buckets]]
+binding = "TILES"
+bucket_name = "p5n-tiles"
+preview_bucket_name = "p5n-tiles-preview"
 
 [assets]
 directory = "./app/dist"
