@@ -1,4 +1,4 @@
-const CACHE = "p5n-shell-v2";
+const CACHE = "p5n-shell-v3";
 const SHELL = ["/", "/assets/index.js", "/assets/index.css"];
 
 self.addEventListener("install", (ev) => {
@@ -17,7 +17,15 @@ self.addEventListener("fetch", (ev) => {
   const url = new URL(ev.request.url);
   if ((url.pathname === "/" || url.pathname.startsWith("/assets/")) && !url.pathname.includes("/api")) {
     ev.respondWith(
-      caches.match(ev.request).then((cached) => cached ?? fetch(ev.request)),
+      fetch(ev.request)
+        .then((resp) => {
+          if (resp.ok) {
+            const clone = resp.clone();
+            void caches.open(CACHE).then((c) => c.put(ev.request, clone));
+          }
+          return resp;
+        })
+        .catch(() => caches.match(ev.request)),
     );
   }
 });
