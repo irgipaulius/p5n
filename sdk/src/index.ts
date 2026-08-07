@@ -8,7 +8,6 @@ import { registerPinInteractions } from "./pin-interactions";
 import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins, shouldUseGrid } from "./pins/viewport-pins";
 import { PinSessionCache } from "./pins/pin-cache";
 import { GridPinLoader } from "./pins/grid-loader";
-import { PMTILES_DETAIL_MIN_ZOOM, PMTILES_DETAIL_TILE_MIN } from "../../shared/pin-zoom-tiers";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -62,25 +61,21 @@ export class P5nMap {
   private gridAvailable = false;
   private useBakedTiles = false;
   private deltaFeatureCount = -1;
-  /** True when baked PMTiles includes individual pin tiles (post re-bake). */
-  private pmtilesDetailTiles = false;
 
   private pmtilesActive(): boolean {
     return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
   }
 
-  private applyManifest(manifest: { grid_cells?: number; tile_count?: number }): void {
-    this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
-    this.pmtilesDetailTiles = (manifest.tile_count ?? 0) >= PMTILES_DETAIL_TILE_MIN;
+  /** PMTiles heatmap when zoomed out; bbox API pins when zoomed in. */
+  private showHeatmap(): boolean {
+    return this.pmtilesActive() && !this.filterMode && shouldUseGrid(this.map);
   }
 
-  /** Bbox API fallback until PMTiles is re-baked with detail tiles. */
-  private useHighZoomBbox(): boolean {
-    return (
-      this.pmtilesActive() &&
-      !this.pmtilesDetailTiles &&
-      this.map.getZoom() >= PMTILES_DETAIL_MIN_ZOOM
-    );
+  private showBboxPins(): boolean {
+    if (this.filterMode) return false;
+    if (this.pmtilesActive()) return !shouldUseGrid(this.map);
+    const useGrid = shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady());
+    return !useGrid || this.deltaFeatures.length > 0;
   }
 
   private tearDownGridLayers(): void {
@@ -88,22 +83,7 @@ export class P5nMap {
     removeGridPinLayers(this.map, this.gridSourceId);
   }
 
-  private clearHighZoomOverlay(): void {
-    this.deltaFeatures = [];
-    this.deltaFeatureCount = -1;
-    removeGeoJsonPinLayers(this.map, this.deltaSourceId);
-    if (this.map.getSource(this.deltaSourceId)) this.map.removeSource(this.deltaSourceId);
-  }
-
-  /** Tear down geohash grid + bbox GeoJSON path when PMTiles are primary. */
-  private tearDownLegacyLayers(): void {
-    this.tearDownGridLayers();
-    this.gridAvailable = false;
-    this.clearHighZoomOverlay();
-    this.pinCache.clear();
-  }
-
-  private async ensureHighZoomOverlay(): Promise<void> {
+  private async ensureBboxPinLayer(): Promise<void> {
     if (!this.map.isStyleLoaded()) return;
     await registerPinIcons(this.map);
     addDeltaGeoJsonSource(this.map, this.deltaSourceId, false);
@@ -117,10 +97,9 @@ export class P5nMap {
       this.tearDownGridLayers();
       if (!this.map.getSource(this.pinsSourceId)) {
         addPinsVectorSource(this.map, this.pinsSourceId, url);
-        addPinLayers(this.map, this.pinsSourceId);
+        addPinLayers(this.map, this.pinsSourceId, { heatmapOnly: true });
       }
-      if (this.useHighZoomBbox()) await this.ensureHighZoomOverlay();
-      else this.clearHighZoomOverlay();
+      if (this.showBboxPins()) await this.ensureBboxPinLayer();
       this.ensureFilteredLayer();
       this.flushFilteredPins();
     } else {
@@ -178,25 +157,13 @@ export class P5nMap {
 
   private applyVisibilityState(): void {
     const usePmtiles = this.pmtilesActive();
-    const z = this.map.getZoom();
-    const highZoomBbox = this.useHighZoomBbox();
     const useGrid =
       !usePmtiles && shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady());
-    const showDelta =
-      !usePmtiles &&
-      !this.filterMode &&
-      (this.deltaFeatures.length > 0 || !useGrid);
+    const showDelta = !usePmtiles && this.showBboxPins();
+
     if (usePmtiles) {
-      const vectorIds = vectorPinLayerIds(this.pinsSourceId);
-      const heatmapId = vectorIds[0];
-      const detailIds = vectorIds.slice(1);
-      setLayerVisibility(this.map, [heatmapId], !this.filterMode && z < PMTILES_DETAIL_MIN_ZOOM);
-      setLayerVisibility(
-        this.map,
-        detailIds,
-        !this.filterMode && this.pmtilesDetailTiles && z >= PMTILES_DETAIL_MIN_ZOOM,
-      );
-      setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), !this.filterMode && highZoomBbox);
+      setLayerVisibility(this.map, [`${this.pinsSourceId}-heatmap`], this.showHeatmap());
+      setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), this.showBboxPins());
     } else {
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode && usePmtiles);
       setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
@@ -228,17 +195,17 @@ export class P5nMap {
 
   async loadViewportPins(): Promise<number> {
     if (this.pmtilesActive()) {
-      if (this.useHighZoomBbox()) {
-        await this.ensureHighZoomOverlay();
+      if (shouldUseGrid(this.map)) {
+        this.setDeltaPins([]);
         this.applyVisibilityState();
-        const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
-        const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
-        refresh();
-        return visible;
+        return 0;
       }
-      this.clearHighZoomOverlay();
+      await this.ensureBboxPinLayer();
       this.applyVisibilityState();
-      return 0;
+      const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
+      const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
+      refresh();
+      return visible;
     }
 
     if (shouldUseGrid(this.map)) {
@@ -309,16 +276,15 @@ export class P5nMap {
       if (this.filterMode) return;
       void (async () => {
         if (this.pmtilesActive()) {
-          if (this.useHighZoomBbox()) {
-            await this.ensureHighZoomOverlay();
-            this.applyVisibilityState();
-            scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
-              this.setDeltaPins(pins);
-            });
-          } else {
-            this.clearHighZoomOverlay();
-            this.applyVisibilityState();
+          this.applyVisibilityState();
+          if (shouldUseGrid(this.map)) {
+            this.setDeltaPins([]);
+            return;
           }
+          await this.ensureBboxPinLayer();
+          scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
+            this.setDeltaPins(pins);
+          });
           return;
         }
         if (shouldUseGrid(this.map)) {
@@ -352,13 +318,13 @@ export class P5nMap {
   async initTilesFromManifest(): Promise<boolean> {
     try {
       const manifest = await fetchTileManifest(this.config.apiBase);
-      this.applyManifest(manifest);
+      this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
       if (manifest.url) {
         this.config.tilesUrl = manifest.url.startsWith("pmtiles://")
           ? manifest.url
           : `pmtiles://${manifest.url}`;
         this.useBakedTiles = true;
-        this.tearDownLegacyLayers();
+        this.tearDownGridLayers();
         if (this.styleReady) await this.attachSources();
         else this.applyVisibilityState();
         return true;
@@ -375,21 +341,21 @@ export class P5nMap {
       this.gridLoader.clear();
 
       const manifest = await fetchTileManifest(this.config.apiBase);
-      this.applyManifest(manifest);
+      this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
 
       if (manifest.url) {
         const url = manifest.url.startsWith("pmtiles://") ? manifest.url : `pmtiles://${manifest.url}`;
         if (this.config.tilesUrl !== url || !this.map.getSource(this.pinsSourceId)) {
           this.config.tilesUrl = url;
           this.useBakedTiles = true;
-          this.tearDownLegacyLayers();
+          this.tearDownGridLayers();
           for (const id of vectorPinLayerIds(this.pinsSourceId)) {
             if (this.map.getLayer(id)) this.map.removeLayer(id);
           }
           if (this.map.getSource(this.pinsSourceId)) this.map.removeSource(this.pinsSourceId);
           if (this.styleReady) await this.attachSources();
         } else {
-          this.tearDownLegacyLayers();
+          this.tearDownGridLayers();
           this.applyVisibilityState();
         }
       } else {
@@ -400,7 +366,6 @@ export class P5nMap {
       if (!this.useBakedTiles) {
         await this.loadViewportPins();
       } else {
-        if (this.pmtilesDetailTiles) this.clearHighZoomOverlay();
         await this.loadViewportPins();
         this.applyVisibilityState();
       }
@@ -449,7 +414,7 @@ export class P5nMap {
   }
 
   addLivePin(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): void {
-    if (this.pmtilesActive() && !this.useHighZoomBbox()) return;
+    if (this.pmtilesActive() && shouldUseGrid(this.map)) return;
     const t = Number(pin.t) || 3;
     const idx = this.deltaFeatures.findIndex((f) => String(f.properties?.id) === pin.id);
     const feature: GeoJSON.Feature = {
@@ -494,10 +459,7 @@ export class P5nMap {
     const layers = this.filterMode
       ? filteredLayerIds(this.filteredSourceId)
       : this.pmtilesActive()
-        ? [
-            ...vectorPinLayerIds(this.pinsSourceId),
-            ...(this.useHighZoomBbox() ? deltaLayerIds(this.deltaSourceId) : []),
-          ]
+        ? [`${this.pinsSourceId}-heatmap`, ...deltaLayerIds(this.deltaSourceId)]
         : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
     setTypeFilter(this.map, types, layers);
   }

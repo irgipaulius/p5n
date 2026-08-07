@@ -309,12 +309,19 @@ export function vectorPinLayerIds(sourceId = "pins-baked"): string[] {
 export function addPinLayers(
   map: maplibregl.Map,
   sourceId: string,
-  opts: { circleLayerId?: string; symbolLayerId?: string; heatmapLayerId?: string; sourceLayer?: string } = {},
+  opts: {
+    circleLayerId?: string;
+    symbolLayerId?: string;
+    heatmapLayerId?: string;
+    sourceLayer?: string;
+    heatmapOnly?: boolean;
+  } = {},
 ): void {
   const heatmapId = opts.heatmapLayerId ?? `${sourceId}-heatmap`;
   const circleId = opts.circleLayerId ?? `${sourceId}-circles`;
   const symbolId = opts.symbolLayerId ?? `${sourceId}-symbols`;
   const sourceLayer = opts.sourceLayer ?? "pins";
+  const heatmapOnly = opts.heatmapOnly ?? false;
 
   if (!map.getLayer(heatmapId)) {
     map.addLayer({
@@ -333,7 +340,7 @@ export function addPinLayers(
     });
   }
 
-  if (!map.getLayer(circleId)) {
+  if (!heatmapOnly && !map.getLayer(circleId)) {
     map.addLayer({
       id: circleId,
       type: "circle",
@@ -351,7 +358,7 @@ export function addPinLayers(
     });
   }
 
-  if (!map.getLayer(symbolId)) {
+  if (!heatmapOnly && !map.getLayer(symbolId)) {
     map.addLayer({
       id: symbolId,
       type: "symbol",

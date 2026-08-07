@@ -1,27 +1,19 @@
 /**
  * Worker-side PMTiles bakery — dashboard POST /api/tiles/bake.
- * geojson-vt + vt-pbf + s2-pmtiles (no tippecanoe/npm required).
+ * Heatmap density only (pin_grid → MVT). Individual pins load via /api/pins/bbox on zoom-in.
  */
 import geojsonvt from "geojson-vt";
 import vtpbf from "vt-pbf";
 import { BufferWriter, S2PMTilesWriter, TileType } from "s2-pmtiles";
-import { typeToInt } from "../shared/place-types";
 import { nowIso } from "./db";
 import type { Env } from "./types";
 
-const EXPORT_BATCH = 5000;
 const LAYER = "pins";
 const EXTENT = 4096;
-const MAX_ZOOM = 14;
-/** Grid heatmap tiles only — individual pins start at PIN_DETAIL_MIN_Z. */
-const GRID_HEATMAP_MAX_Z = 8;
-const PIN_DETAIL_MIN_Z = 10;
-/** Single detail zoom — MapLibre overzooms; keeps Worker bake under ~20k tiles. */
-const PIN_DETAIL_MAX_Z = 10;
+const GRID_HEATMAP_MAX_Z = 10;
 
 type PinFeature = {
   type: "Feature";
-  id?: string | number;
   geometry: { type: "Point"; coordinates: [number, number] };
   properties?: Record<string, unknown>;
 };
@@ -52,98 +44,10 @@ export type BakeProgress = {
   total: number;
 };
 
-function clusterTileFeatures(features: GeoJsonVtTile["features"], z: number): GeoJsonVtTile["features"] {
-  if (z > GRID_HEATMAP_MAX_Z || features.length === 0) return features;
-
-  const grid = z <= 4 ? 512 : z <= 7 ? 256 : 128;
-  const cells = new Map<string, { x: number; y: number; count: number }>();
-
-  for (const f of features) {
-    const ring = f.geometry?.[0];
-    if (!ring?.length) continue;
-    const ax = Array.isArray(ring[0]) ? ring[0][0] : ring[0];
-    const ay = Array.isArray(ring[0]) ? ring[0][1] : ring[1];
-    const cx = Math.floor(Number(ax) / grid) * grid + grid / 2;
-    const cy = Math.floor(Number(ay) / grid) * grid + grid / 2;
-    const key = `${cx},${cy}`;
-    const cur = cells.get(key);
-    if (cur) cur.count += 1;
-    else cells.set(key, { x: cx, y: cy, count: 1 });
-  }
-
-  return [...cells.values()].map((c, i) => ({
-    type: 1,
-    geometry: [[[c.x, c.y]]],
-    properties: { point_count: c.count },
-    id: i,
-  }));
-}
-
 function encodeTile(tile: GeoJsonVtTile | null): Uint8Array | null {
   if (!tile?.features?.length) return null;
   const buf = vtpbf.fromGeojsonVt({ [LAYER]: tile }, { version: 2, extent: EXTENT });
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-}
-
-function lngLatToTile(lng: number, lat: number, z: number): { x: number; y: number } {
-  const n = 1 << z;
-  const x = Math.min(n - 1, Math.max(0, Math.floor(((lng + 180) / 360) * n)));
-  const latRad = (lat * Math.PI) / 180;
-  const y = Math.min(
-    n - 1,
-    Math.max(0, Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n)),
-  );
-  return { x, y };
-}
-
-function placeToTileFeature(
-  f: PinFeature,
-  z: number,
-  x: number,
-  y: number,
-): GeoJsonVtTile["features"][number] {
-  const [lng, lat] = f.geometry.coordinates;
-  const px = ((lng + 180) / 360) * (1 << z) * EXTENT;
-  const latRad = (lat * Math.PI) / 180;
-  const py = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * (1 << z) * EXTENT;
-  return {
-    type: 1,
-    geometry: [[Math.round(px - x * EXTENT), Math.round(py - y * EXTENT)]],
-    tags: { id: String(f.properties?.id ?? f.id), t: f.properties?.t as number },
-    id: f.id,
-  };
-}
-
-/** Bucket places into MVT tiles without geojson-vt (worker-safe for 60k+ pins). */
-async function writePinTilesDirect(
-  writer: S2PMTilesWriter,
-  features: PinFeature[],
-  minZ: number,
-  maxZ: number,
-): Promise<number> {
-  let written = 0;
-  for (let z = minZ; z <= maxZ; z++) {
-    const buckets = new Map<string, GeoJsonVtTile["features"]>();
-    for (const f of features) {
-      const [lng, lat] = f.geometry.coordinates;
-      const { x, y } = lngLatToTile(lng, lat, z);
-      const key = `${x},${y}`;
-      let list = buckets.get(key);
-      if (!list) {
-        list = [];
-        buckets.set(key, list);
-      }
-      list.push(placeToTileFeature(f, z, x, y));
-    }
-    for (const [key, feats] of buckets) {
-      const [x, y] = key.split(",").map(Number);
-      const data = encodeTile({ features: feats });
-      if (!data) continue;
-      await writer.writeTileXYZ(z, x, y, data);
-      written += 1;
-    }
-  }
-  return written;
 }
 
 function childTiles(z: number, x: number, y: number): Array<{ z: number; x: number; y: number }> {
@@ -158,7 +62,6 @@ function childTiles(z: number, x: number, y: number): Array<{ z: number; x: numb
   ];
 }
 
-/** Walk geojson-vt tree — tileCoords alone often only lists index tiles (e.g. z0). */
 function enumerateTiles(index: GeoJsonVtIndex, minZ: number, maxZ: number): Array<{ z: number; x: number; y: number }> {
   const out: Array<{ z: number; x: number; y: number }> = [];
   const queue: Array<{ z: number; x: number; y: number }> = [...index.tileCoords];
@@ -192,16 +95,10 @@ async function writeIndexTiles(
   index: GeoJsonVtIndex,
   minZ: number,
   maxZ: number,
-  clusterHeatmap: boolean,
 ): Promise<number> {
   let written = 0;
   for (const { z, x, y } of enumerateTiles(index, minZ, maxZ)) {
-    let tile = index.getTile(z, x, y);
-    if (!tile?.features?.length) continue;
-    if (clusterHeatmap) {
-      tile = { features: clusterTileFeatures(tile.features, z) };
-      if (!tile.features.length) continue;
-    }
+    const tile = index.getTile(z, x, y);
     const data = encodeTile(tile);
     if (!data) continue;
     await writer.writeTileXYZ(z, x, y, data);
@@ -219,43 +116,6 @@ function gridToGeoJson(rows: Array<{ g4: string; count: number; lat: number; lng
       properties: { count: r.count, point_count: r.count, g4: r.g4, grid: true },
     })),
   };
-}
-
-async function loadAllPlaces(
-  db: D1Database,
-  onProgress: (done: number, total: number) => Promise<void>,
-): Promise<{ total: number; collection: PinFeatureCollection }> {
-  const total =
-    (await db.prepare("SELECT COUNT(*) AS n FROM places WHERE lat IS NOT NULL").first<{ n: number }>())?.n ?? 0;
-
-  const features: PinFeature[] = [];
-  let offset = 0;
-
-  while (offset < total) {
-    const batch = await db
-      .prepare(
-        `SELECT place_id, lat, lng, type FROM places WHERE lat IS NOT NULL ORDER BY place_id LIMIT ? OFFSET ?`,
-      )
-      .bind(EXPORT_BATCH, offset)
-      .all<{ place_id: string; lat: number; lng: number; type: string }>();
-
-    const rows = batch.results ?? [];
-    if (rows.length === 0) break;
-
-    for (const row of rows) {
-      features.push({
-        type: "Feature",
-        id: row.place_id,
-        geometry: { type: "Point", coordinates: [row.lng, row.lat] },
-        properties: { id: String(row.place_id), t: typeToInt(row.type) },
-      });
-    }
-
-    offset += rows.length;
-    await onProgress(offset, total);
-  }
-
-  return { total, collection: { type: "FeatureCollection", features } };
 }
 
 export async function buildPmtilesBytes(
@@ -278,19 +138,17 @@ export async function buildPmtilesBytes(
     throw new Error("pin_grid empty — nothing to bake");
   }
 
-  await onProgress({ phase: "export", done: 0, total: 1 });
+  await onProgress({ phase: "grid", done: 1, total: 1 });
 
-  const { total: placeCount, collection } = await loadAllPlaces(db, async (done, total) => {
-    await onProgress({ phase: "export", done, total });
-  });
+  const placeCount =
+    (await db.prepare("SELECT COUNT(*) AS n FROM places WHERE lat IS NOT NULL").first<{ n: number }>())?.n ?? 0;
 
   if (placeCount === 0) {
     throw new Error("no places with coordinates to bake");
   }
 
-  await onProgress({ phase: "tile", done: 0, total: 3 });
+  await onProgress({ phase: "tile", done: 0, total: 1 });
 
-  // Light index in memory; enumerateTiles BFS-walks to all zooms at write time.
   const gridIndex = geojsonvt(gridToGeoJson(gridRows), {
     maxZoom: GRID_HEATMAP_MAX_Z,
     indexMaxZoom: 5,
@@ -301,33 +159,26 @@ export async function buildPmtilesBytes(
   }) as unknown as GeoJsonVtIndex;
 
   const writer = new S2PMTilesWriter(new BufferWriter(), TileType.Pbf);
-
-  let tileCount = 0;
-  tileCount += await writeIndexTiles(writer, gridIndex, 0, GRID_HEATMAP_MAX_Z, false);
-  await onProgress({ phase: "tile", done: 1, total: 3 });
-
-  tileCount += await writePinTilesDirect(writer, collection.features, PIN_DETAIL_MIN_Z, MAX_ZOOM);
-  await onProgress({ phase: "tile", done: 2, total: 3 });
+  const tileCount = await writeIndexTiles(writer, gridIndex, 0, GRID_HEATMAP_MAX_Z);
+  await onProgress({ phase: "tile", done: 1, total: 1 });
 
   await writer.commit({
     name: "p5n-pins",
-    description: "Park5Night POI pins",
+    description: "Park5Night heatmap density (pins via bbox API when zoomed in)",
     version: "1",
     minzoom: 0,
-    maxzoom: MAX_ZOOM,
+    maxzoom: GRID_HEATMAP_MAX_Z,
     type: "overlay",
     vector_layers: [
       {
         id: LAYER,
-        fields: { id: "String", t: "Number", point_count: "Number" },
-        description: "Camping / parking POIs",
+        fields: { point_count: "Number", count: "Number" },
+        description: "Pre-aggregated pin density",
         minzoom: 0,
-        maxzoom: MAX_ZOOM,
+        maxzoom: GRID_HEATMAP_MAX_Z,
       },
     ],
   });
-
-  await onProgress({ phase: "tile", done: 3, total: 3 });
 
   const bufWriter = writer.writer as BufferWriter;
   const bytes = bufWriter.commit();
