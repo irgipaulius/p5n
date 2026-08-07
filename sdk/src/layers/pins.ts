@@ -4,6 +4,13 @@ import { iconImageExpression } from "../icons/pin-icons";
 
 const TYPE_NUM = ["to-number", ["get", "t"]] as maplibregl.ExpressionSpecification;
 
+/** Shared GeoJSON cluster source options. */
+export const PIN_CLUSTER_SOURCE_OPTS = {
+  cluster: true as const,
+  clusterMaxZoom: 11,
+  clusterRadius: 44,
+};
+
 function typeColorMatch(): maplibregl.ExpressionSpecification {
   const expr: unknown[] = ["match", TYPE_NUM];
   for (const t of ALL_TYPE_INTS) {
@@ -13,11 +20,194 @@ function typeColorMatch(): maplibregl.ExpressionSpecification {
   return expr as maplibregl.ExpressionSpecification;
 }
 
-/** Circle + symbol layers for a geojson pin source (with GPU clustering). */
+const HEATMAP_COLOR: maplibregl.ExpressionSpecification = [
+  "interpolate",
+  ["linear"],
+  ["heatmap-density"],
+  0,
+  "rgba(15, 23, 42, 0)",
+  0.12,
+  "rgba(56, 189, 248, 0.18)",
+  0.35,
+  "rgba(14, 165, 233, 0.42)",
+  0.55,
+  "rgba(251, 146, 60, 0.48)",
+  0.75,
+  "rgba(249, 115, 22, 0.58)",
+  1,
+  "rgba(234, 88, 12, 0.72)",
+];
+
+/** All layer ids owned by a geojson pin source. */
+export function geoJsonPinLayerIds(sourceId: string): string[] {
+  return [
+    `${sourceId}-heatmap`,
+    `${sourceId}-cluster-glow`,
+    `${sourceId}-clusters`,
+    `${sourceId}-cluster-count`,
+    `${sourceId}-circles`,
+    `${sourceId}-symbols`,
+  ];
+}
+
+export function removeGeoJsonPinLayers(map: maplibregl.Map, sourceId: string): void {
+  for (const id of geoJsonPinLayerIds(sourceId)) {
+    if (map.getLayer(id)) map.removeLayer(id);
+  }
+}
+
+const COUNT = ["to-number", ["get", "count"]] as maplibregl.ExpressionSpecification;
+const POINT_COUNT = ["to-number", ["coalesce", ["get", "point_count"], 1]] as maplibregl.ExpressionSpecification;
+const NOT_CLUSTER: maplibregl.FilterSpecification = ["!", ["has", "point_count"]];
+
+/** Server-preaggregated grid cells — no client clustering. */
+export function gridPinLayerIds(sourceId = "pins-grid"): string[] {
+  return [`${sourceId}-heatmap`, `${sourceId}-glow`, `${sourceId}-cells`, `${sourceId}-count`];
+}
+
+export function addGridPinLayers(map: maplibregl.Map, sourceId = "pins-grid"): void {
+  const heatmapId = `${sourceId}-heatmap`;
+  const glowId = `${sourceId}-glow`;
+  const cellId = `${sourceId}-cells`;
+  const countId = `${sourceId}-count`;
+
+  if (!map.getLayer(heatmapId)) {
+    map.addLayer({
+      id: heatmapId,
+      type: "heatmap",
+      source: sourceId,
+      maxzoom: 8,
+      paint: {
+        "heatmap-weight": COUNT,
+        "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 0, 0.6, 6, 1.4, 8, 2],
+        "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 16, 6, 28, 8, 38],
+        "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 4, 0.85, 7, 0.2, 8, 0],
+        "heatmap-color": HEATMAP_COLOR,
+      },
+    });
+  }
+
+  if (!map.getLayer(glowId)) {
+    map.addLayer({
+      id: glowId,
+      type: "circle",
+      source: sourceId,
+      paint: {
+        "circle-color": [
+          "interpolate",
+          ["linear"],
+          COUNT,
+          1,
+          "#38bdf8",
+          50,
+          "#0ea5e9",
+          200,
+          "#f97316",
+        ],
+        "circle-radius": ["step", COUNT, 28, 10, 34, 50, 44, 200, 56, 500, 68],
+        "circle-opacity": 0.2,
+        "circle-blur": 1,
+      },
+    });
+  }
+
+  if (!map.getLayer(cellId)) {
+    map.addLayer({
+      id: cellId,
+      type: "circle",
+      source: sourceId,
+      paint: {
+        "circle-color": [
+          "interpolate",
+          ["linear"],
+          COUNT,
+          1,
+          "rgba(56, 189, 248, 0.55)",
+          50,
+          "rgba(14, 165, 233, 0.62)",
+          200,
+          "rgba(249, 115, 22, 0.68)",
+        ],
+        "circle-radius": ["step", COUNT, 16, 10, 20, 50, 28, 200, 36, 500, 44],
+        "circle-opacity": 0.72,
+        "circle-blur": 0.4,
+        "circle-stroke-width": 0,
+      },
+    });
+  }
+
+  if (!map.getLayer(countId)) {
+    map.addLayer({
+      id: countId,
+      type: "symbol",
+      source: sourceId,
+      layout: {
+        "text-field": ["to-string", COUNT],
+        "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+        "text-size": ["step", COUNT, 11, 50, 12, 200, 14],
+        "text-allow-overlap": true,
+        "text-ignore-placement": true,
+      },
+      paint: {
+        "text-color": "#f0f9ff",
+        "text-halo-color": "rgba(15, 23, 42, 0.75)",
+        "text-halo-width": 1.5,
+      },
+    });
+  }
+}
+
+/** Heatmap + soft clusters + larger pin markers. */
 export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clustered = true): void {
+  const heatmapId = `${sourceId}-heatmap`;
+  const glowId = `${sourceId}-cluster-glow`;
   const clusterId = `${sourceId}-clusters`;
+  const countId = `${sourceId}-cluster-count`;
   const circleId = `${sourceId}-circles`;
   const symbolId = `${sourceId}-symbols`;
+
+  if (clustered && !map.getLayer(heatmapId)) {
+    map.addLayer({
+      id: heatmapId,
+      type: "heatmap",
+      source: sourceId,
+      maxzoom: 10,
+      paint: {
+        "heatmap-weight": 1,
+        "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 0, 0.5, 6, 1.2, 9, 2],
+        "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 18, 6, 28, 9, 42],
+        "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 5, 0.9, 9, 0.35, 10, 0],
+        "heatmap-color": HEATMAP_COLOR,
+      },
+    });
+  }
+
+  if (clustered && !map.getLayer(glowId)) {
+    map.addLayer({
+      id: glowId,
+      type: "circle",
+      source: sourceId,
+      filter: ["has", "point_count"],
+      minzoom: 0,
+      maxzoom: 12,
+      paint: {
+        "circle-color": [
+          "interpolate",
+          ["linear"],
+          ["get", "point_count"],
+          10,
+          "#38bdf8",
+          100,
+          "#0ea5e9",
+          500,
+          "#f97316",
+        ],
+        "circle-radius": ["step", ["get", "point_count"], 32, 25, 40, 100, 52, 500, 68],
+        "circle-opacity": 0.22,
+        "circle-blur": 1,
+      },
+    });
+  }
 
   if (clustered && !map.getLayer(clusterId)) {
     map.addLayer({
@@ -25,23 +215,47 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clust
       type: "circle",
       source: sourceId,
       filter: ["has", "point_count"],
+      minzoom: 0,
       maxzoom: 12,
       paint: {
         "circle-color": [
-          "step",
+          "interpolate",
+          ["linear"],
           ["get", "point_count"],
-          "#38bdf8",
-          25,
-          "#0ea5e9",
+          10,
+          "rgba(56, 189, 248, 0.55)",
           100,
-          "#0284c7",
+          "rgba(14, 165, 233, 0.62)",
           500,
-          "#0369a1",
+          "rgba(249, 115, 22, 0.68)",
         ],
-        "circle-radius": ["step", ["get", "point_count"], 16, 25, 20, 100, 26, 500, 34],
-        "circle-stroke-width": 2,
-        "circle-stroke-color": "#0f172a",
-        "circle-opacity": 0.9,
+        "circle-radius": ["step", ["get", "point_count"], 18, 25, 24, 100, 32, 500, 42],
+        "circle-opacity": 0.7,
+        "circle-blur": 0.45,
+        "circle-stroke-width": 0,
+      },
+    });
+  }
+
+  if (clustered && !map.getLayer(countId)) {
+    map.addLayer({
+      id: countId,
+      type: "symbol",
+      source: sourceId,
+      filter: ["has", "point_count"],
+      minzoom: 0,
+      maxzoom: 12,
+      layout: {
+        "text-field": ["get", "point_count_abbreviated"],
+        "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"],
+        "text-size": ["step", ["get", "point_count"], 11, 100, 13, 500, 15],
+        "text-allow-overlap": true,
+        "text-ignore-placement": true,
+      },
+      paint: {
+        "text-color": "#f0f9ff",
+        "text-halo-color": "rgba(15, 23, 42, 0.75)",
+        "text-halo-width": 1.5,
       },
     });
   }
@@ -52,12 +266,10 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clust
       type: "circle",
       source: sourceId,
       filter: clustered ? ["!", ["has", "point_count"]] : undefined,
-      minzoom: 0,
-      maxzoom: 11.5,
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 4, 8, 6, 12, 8],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 7, 8, 9, 12, 11, 16, 14],
         "circle-color": typeColorMatch(),
-        "circle-stroke-width": 2,
+        "circle-stroke-width": 2.5,
         "circle-stroke-color": "#0f172a",
         "circle-opacity": 0.95,
       },
@@ -70,10 +282,10 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clust
       type: "symbol",
       source: sourceId,
       filter: clustered ? ["!", ["has", "point_count"]] : undefined,
-      minzoom: 11.5,
+      minzoom: 9,
       layout: {
         "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 12, 0.7, 16, 1],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.95, 13, 1.15, 17, 1.45],
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
@@ -81,14 +293,36 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clust
   }
 }
 
+export function vectorPinLayerIds(sourceId = "pins-baked"): string[] {
+  return [`${sourceId}-heatmap`, `${sourceId}-circles`, `${sourceId}-symbols`];
+}
+
 export function addPinLayers(
   map: maplibregl.Map,
   sourceId: string,
-  opts: { circleLayerId?: string; symbolLayerId?: string; sourceLayer?: string } = {},
+  opts: { circleLayerId?: string; symbolLayerId?: string; heatmapLayerId?: string; sourceLayer?: string } = {},
 ): void {
+  const heatmapId = opts.heatmapLayerId ?? `${sourceId}-heatmap`;
   const circleId = opts.circleLayerId ?? `${sourceId}-circles`;
   const symbolId = opts.symbolLayerId ?? `${sourceId}-symbols`;
   const sourceLayer = opts.sourceLayer ?? "pins";
+
+  if (!map.getLayer(heatmapId)) {
+    map.addLayer({
+      id: heatmapId,
+      type: "heatmap",
+      source: sourceId,
+      "source-layer": sourceLayer,
+      maxzoom: 12,
+      paint: {
+        "heatmap-weight": POINT_COUNT,
+        "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 0, 0.5, 6, 1.2, 10, 2],
+        "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 18, 6, 28, 10, 42],
+        "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 5, 0.9, 10, 0.35, 12, 0],
+        "heatmap-color": HEATMAP_COLOR,
+      },
+    });
+  }
 
   if (!map.getLayer(circleId)) {
     map.addLayer({
@@ -96,14 +330,14 @@ export function addPinLayers(
       type: "circle",
       source: sourceId,
       "source-layer": sourceLayer,
-      minzoom: 0,
-      maxzoom: 11.5,
+      filter: NOT_CLUSTER,
+      minzoom: 9,
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, 4, 8, 6, 12, 8],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 7, 8, 9, 12, 11, 16, 14],
         "circle-color": typeColorMatch(),
-        "circle-stroke-width": 2,
+        "circle-stroke-width": 2.5,
         "circle-stroke-color": "#0f172a",
-        "circle-opacity": 0.95,
+        "circle-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0, 11, 0.95],
       },
     });
   }
@@ -114,12 +348,16 @@ export function addPinLayers(
       type: "symbol",
       source: sourceId,
       "source-layer": sourceLayer,
-      minzoom: 11.5,
+      filter: NOT_CLUSTER,
+      minzoom: 11,
       layout: {
         "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 12, 0.7, 16, 1],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.95, 13, 1.15, 17, 1.45],
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
+      },
+      paint: {
+        "icon-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 1],
       },
     });
   }
@@ -130,19 +368,15 @@ export function addDeltaPinLayers(map: maplibregl.Map, sourceId = "pins-delta"):
 }
 
 export function deltaLayerIds(deltaId = "pins-delta"): string[] {
-  return [`${deltaId}-clusters`, `${deltaId}-circles`, `${deltaId}-symbols`];
+  return geoJsonPinLayerIds(deltaId);
 }
 
 export function baseLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): string[] {
-  return [
-    `${sourceId}-circles`,
-    `${sourceId}-symbols`,
-    ...deltaLayerIds(deltaId),
-  ];
+  return [...vectorPinLayerIds(sourceId), ...deltaLayerIds(deltaId)];
 }
 
 export function filteredLayerIds(filteredId = "pins-filtered"): string[] {
-  return [`${filteredId}-clusters`, `${filteredId}-circles`, `${filteredId}-symbols`];
+  return geoJsonPinLayerIds(filteredId);
 }
 
 export function clickableLayerIds(
@@ -173,7 +407,11 @@ export function setTypeFilter(map: maplibregl.Map, types: number[] | null, layer
     filter = ["in", TYPE_NUM, ["literal", types]];
   }
   for (const id of layerIds) {
-    if (map.getLayer(id)) map.setFilter(id, filter);
+    if (!map.getLayer(id)) continue;
+    if (id.endsWith("-heatmap") || id.endsWith("-cluster-glow") || id.endsWith("-clusters") || id.endsWith("-cluster-count")) {
+      continue;
+    }
+    map.setFilter(id, filter);
   }
 }
 
@@ -211,7 +449,7 @@ export function ensureSelectedPinLayer(map: maplibregl.Map): void {
       type: "circle",
       source: SELECTED_SOURCE,
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 14, 10, 18, 14, 24],
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 16, 10, 22, 14, 28],
         "circle-color": "#38bdf8",
         "circle-opacity": 0.35,
         "circle-stroke-width": 3,
@@ -227,7 +465,7 @@ export function ensureSelectedPinLayer(map: maplibregl.Map): void {
       source: SELECTED_SOURCE,
       layout: {
         "icon-image": iconImageExpression(),
-        "icon-size": ["interpolate", ["linear"], ["zoom"], 4, 1.1, 10, 1.35, 14, 1.6],
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 4, 1.2, 10, 1.45, 14, 1.75],
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },

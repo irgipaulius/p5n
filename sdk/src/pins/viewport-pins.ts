@@ -1,10 +1,11 @@
 import type maplibregl from "maplibre-gl";
+import { bboxPinLimit } from "../../../shared/pin-zoom-tiers";
 import { geohash4CellsForBbox } from "../geohash";
 import type { PinFeature } from "../types";
 import type { PinSessionCache } from "./pin-cache";
-import { shouldFetchPins, viewportBbox } from "./zoom-policy";
+import { shouldFetchPins, shouldUseGrid, viewportBbox } from "./zoom-policy";
 
-export { viewportBbox as expandedBbox, shouldFetchPins };
+export { viewportBbox as expandedBbox, shouldFetchPins, shouldUseGrid };
 
 export function pinInBbox(
   pin: { lat: number; lng: number },
@@ -20,16 +21,26 @@ export function pinInBbox(
 
 const MAX_TILES_PER_REQUEST = 48;
 const MAX_PARALLEL_REQUESTS = 4;
-const MAX_PINS_IN_VIEW = 4000;
+const MAX_PINS_IN_VIEW = 8000;
 
-export async function fetchViewportPins(apiBase: string, map: maplibregl.Map): Promise<PinFeature[]> {
+function maxCellsForZoom(z: number): number {
+  if (z < 8) return 32;
+  if (z < 10) return 48;
+  return 64;
+}
+
+export async function fetchViewportPins(
+  apiBase: string,
+  map: maplibregl.Map,
+): Promise<PinFeature[]> {
   const { west, south, east, north } = viewportBbox(map);
+  const limit = bboxPinLimit(map.getZoom());
   const params = new URLSearchParams({
     west: String(west),
     south: String(south),
     east: String(east),
     north: String(north),
-    limit: "5000",
+    limit: String(limit),
   });
   const resp = await fetch(`${apiBase}/api/pins/bbox?${params}`);
   if (!resp.ok) return [];
@@ -77,19 +88,37 @@ function capPins(pins: PinFeature[]): PinFeature[] {
   return pins.slice(0, MAX_PINS_IN_VIEW);
 }
 
-/** Load missing geohash4 tiles into cache; render from cache only. */
+function visiblePins(map: maplibregl.Map, cache: PinSessionCache): PinFeature[] {
+  return capPins(cache.pinsInBbox(viewportBbox(map)));
+}
+
+/** Mid/high zoom — bbox or geohash tiles. Grid handled separately. */
 export async function syncViewportPins(
   apiBase: string,
   map: maplibregl.Map,
   cache: PinSessionCache,
   onProgress?: () => void,
 ): Promise<{ visible: number; fetched: number; cached: number }> {
-  if (!shouldFetchPins(map)) {
-    return { visible: 0, fetched: 0, cached: cache.size };
+  const visible = visiblePins(map, cache);
+
+  if (!shouldFetchPins(map) || shouldUseGrid(map)) {
+    return { visible: visible.length, fetched: 0, cached: cache.size };
+  }
+
+  const z = map.getZoom();
+
+  if (z < 10) {
+    const pins = await fetchViewportPins(apiBase, map);
+    const added = cache.mergePins(pins);
+    onProgress?.();
+    const after = visiblePins(map, cache);
+    return { visible: after.length, fetched: added, cached: cache.size };
   }
 
   const bbox = viewportBbox(map);
-  const cells = geohash4CellsForBbox(bbox);
+  let cells = geohash4CellsForBbox(bbox);
+  const cap = maxCellsForZoom(z);
+  if (cells.length > cap) cells = cells.slice(0, cap);
   const missing = cache.missingTiles(cells);
 
   if (missing.length > 0) {
@@ -99,8 +128,8 @@ export async function syncViewportPins(
     });
   }
 
-  const visible = capPins(cache.pinsInBbox(bbox));
-  return { visible: visible.length, fetched: missing.length, cached: cache.size };
+  const after = visiblePins(map, cache);
+  return { visible: after.length, fetched: missing.length, cached: cache.size };
 }
 
 let loadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -112,21 +141,17 @@ export function scheduleViewportPins(
   onPins: (pins: PinFeature[], meta: { fromCache: boolean }) => void,
   delayMs = 300,
 ): void {
-  if (!shouldFetchPins(map)) {
-    onPins([], { fromCache: true });
-    return;
-  }
+  onPins(visiblePins(map, cache), { fromCache: true });
 
-  const bbox = viewportBbox(map);
-  onPins(capPins(cache.pinsInBbox(bbox)), { fromCache: true });
+  if (!shouldFetchPins(map) || shouldUseGrid(map)) return;
 
   if (loadTimer) clearTimeout(loadTimer);
   const delay = cache.size === 0 ? 0 : delayMs;
   loadTimer = setTimeout(() => {
     void syncViewportPins(apiBase, map, cache, () => {
-      onPins(capPins(cache.pinsInBbox(viewportBbox(map))), { fromCache: false });
+      onPins(visiblePins(map, cache), { fromCache: false });
     }).then(() => {
-      onPins(capPins(cache.pinsInBbox(viewportBbox(map))), { fromCache: false });
+      onPins(visiblePins(map, cache), { fromCache: false });
     });
   }, delay);
 }

@@ -32,7 +32,31 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     `ALTER TABLE tile_manifest ADD COLUMN bake_total INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE tile_manifest ADD COLUMN bake_error TEXT`,
     `ALTER TABLE tile_manifest ADD COLUMN bake_started_at TEXT`,
+    `ALTER TABLE tile_manifest ADD COLUMN grid_cells INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE tile_manifest ADD COLUMN bake_phase TEXT`,
+    `ALTER TABLE tile_chunks ADD COLUMN data BLOB`,
   ]) {
     await trySql(db, sql);
   }
+
+  await trySql(
+    db,
+    `CREATE TABLE IF NOT EXISTS tile_blob (
+      key TEXT PRIMARY KEY,
+      data BLOB NOT NULL,
+      bytes INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    )`,
+  );
+
+  await trySql(
+    db,
+    `CREATE TABLE IF NOT EXISTS pin_grid (
+      g4 TEXT PRIMARY KEY,
+      count INTEGER NOT NULL,
+      lat REAL NOT NULL,
+      lng REAL NOT NULL
+    )`,
+  );
+  await trySql(db, `CREATE INDEX IF NOT EXISTS idx_pin_grid_count ON pin_grid(count)`);
 }

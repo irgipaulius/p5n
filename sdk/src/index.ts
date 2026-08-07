@@ -3,11 +3,12 @@ import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
-import { addDeltaPinLayers, addGeoJsonPinLayers, addPinLayers, baseLayerIds, clickableLayerIds, deltaLayerIds, filteredLayerIds, setLayerVisibility, setSelectedPinFeature, setTypeFilter } from "./layers/pins";
-import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins } from "./pins/viewport-pins";
+import { addDeltaPinLayers, addGeoJsonPinLayers, addGridPinLayers, addPinLayers, baseLayerIds, deltaLayerIds, filteredLayerIds, gridPinLayerIds, PIN_CLUSTER_SOURCE_OPTS, setLayerVisibility, setSelectedPinFeature, setTypeFilter, vectorPinLayerIds } from "./layers/pins";
+import { registerPinInteractions } from "./pin-interactions";
+import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins, shouldUseGrid } from "./pins/viewport-pins";
 import { PinSessionCache } from "./pins/pin-cache";
-import { ChunkTileLoader } from "./pins/chunk-loader";
-import { CHUNK_LOAD_MIN_ZOOM, PIN_FETCH_MIN_ZOOM } from "./pins/zoom-policy";
+import { GridPinLoader } from "./pins/grid-loader";
+import { GRID_MAX_ZOOM } from "./pins/zoom-policy";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -26,6 +27,7 @@ export class P5nMap {
   readonly config: P5nConfig;
   private pinsSourceId = "pins-baked";
   private deltaSourceId = "pins-delta";
+  private gridSourceId = "pins-grid";
   private deltaFeatures: GeoJSON.Feature[] = [];
   private styleReady = false;
   private layerAttach?: () => void;
@@ -42,7 +44,7 @@ export class P5nMap {
     });
     registerPmtilesProtocol();
     this.map = createMap(container, config);
-    this.chunkLoader = new ChunkTileLoader(this.map, config.apiBase);
+    this.gridLoader = new GridPinLoader(this.map, config.apiBase, this.gridSourceId);
     this.map.on("load", () => {
       this.styleReady = true;
       void this.attachSources().then(() => this.resolveLayersReady());
@@ -56,7 +58,8 @@ export class P5nMap {
 
   private filteredFeatures: GeoJSON.Feature[] = [];
   private pinCache = new PinSessionCache();
-  private chunkLoader!: ChunkTileLoader;
+  private gridLoader!: GridPinLoader;
+  private gridAvailable = false;
   private useBakedTiles = false;
   private deltaFeatureCount = -1;
 
@@ -68,6 +71,7 @@ export class P5nMap {
       addPinLayers(this.map, this.pinsSourceId);
     }
     await this.ensureDeltaLayer();
+    this.ensureGridLayer();
     setSelectedPinFeature(this.map, this.selectedPin);
     this.layerAttach = () => {
       void this.attachSources();
@@ -96,18 +100,31 @@ export class P5nMap {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
         promoteId: "id",
-        cluster: true,
-        clusterMaxZoom: 11,
-        clusterRadius: 48,
+        ...PIN_CLUSTER_SOURCE_OPTS,
       });
       addGeoJsonPinLayers(this.map, this.filteredSourceId);
     }
   }
 
+  private ensureGridLayer(): void {
+    if (!this.map.getSource(this.gridSourceId)) {
+      this.map.addSource(this.gridSourceId, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      addGridPinLayers(this.map, this.gridSourceId);
+    }
+  }
+
   private applyVisibilityState(): void {
-    const bakedIds = [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`];
-    setLayerVisibility(this.map, bakedIds, !this.filterMode);
-    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), !this.filterMode);
+    const usePmtiles = this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
+    const useGrid =
+      !usePmtiles && shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady());
+    const showDelta =
+      !this.filterMode && (this.deltaFeatures.length > 0 || (!usePmtiles && !useGrid));
+    setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode && usePmtiles);
+    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
+    setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && useGrid);
     setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
     if (this.activeTypeFilter && !this.filterMode) {
       this.filterTypes(this.activeTypeFilter);
@@ -115,6 +132,7 @@ export class P5nMap {
       setTypeFilter(this.map, this.activeTypeFilter, filteredLayerIds(this.filteredSourceId));
     } else if (this.activeTypeFilter) {
       setTypeFilter(this.map, this.activeTypeFilter, [
+        ...vectorPinLayerIds(this.pinsSourceId),
         ...deltaLayerIds(this.deltaSourceId),
         ...filteredLayerIds(this.filteredSourceId),
       ]);
@@ -128,15 +146,25 @@ export class P5nMap {
     if (n === this.deltaFeatureCount) return;
     this.deltaFeatureCount = n;
     src.setData({ type: "FeatureCollection", features: this.deltaFeatures });
+    this.applyVisibilityState();
   }
 
   async loadViewportPins(): Promise<number> {
     if (this.useBakedTiles) return 0;
-    await this.chunkLoader.sync();
-    if (!shouldFetchPins(this.map)) {
-      this.setDeltaPins([]);
-      return 0;
+
+    if (shouldUseGrid(this.map)) {
+      this.applyVisibilityState();
+      const n = await this.gridLoader.sync();
+      this.gridAvailable = this.gridAvailable || this.gridLoader.isReady();
+      if (this.gridLoader.isReady()) {
+        this.setDeltaPins([]);
+        this.applyVisibilityState();
+        return n;
+      }
+      /* pin_grid empty — fall through to bbox until bake runs */
     }
+
+    this.applyVisibilityState();
     const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
     const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
     refresh();
@@ -178,28 +206,32 @@ export class P5nMap {
   }
 
   onMoveEndLoadPins(): void {
-    this.map.on("moveend", () => {
-      if (this.filterMode) return;
-      void this.chunkLoader.sync();
-      if (this.useBakedTiles) return;
-      if (!shouldFetchPins(this.map)) {
-        this.setDeltaPins([]);
-        return;
-      }
-      scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
-        this.setDeltaPins(pins);
-      });
+    let moveTimer: ReturnType<typeof setTimeout> | null = null;
+    this.map.on("move", () => {
+      if (this.useBakedTiles || this.filterMode || !shouldUseGrid(this.map) || !this.gridAvailable) return;
+      if (moveTimer) return;
+      moveTimer = setTimeout(() => {
+        moveTimer = null;
+        this.gridLoader.repaint();
+      }, 50);
     });
-  }
 
-  /** Minimum zoom before regional chunk tiles load. */
-  pinZoomHint(): string | null {
-    const z = this.map.getZoom();
-    if (z < CHUNK_LOAD_MIN_ZOOM) return `Zoom in to see pins (z${CHUNK_LOAD_MIN_ZOOM}+)`;
-    if (!this.useBakedTiles && this.chunkLoader.loadedCount() === 0 && z < PIN_FETCH_MIN_ZOOM) {
-      return `Zoom in further for detail (z${PIN_FETCH_MIN_ZOOM}+)`;
-    }
-    return null;
+    this.map.on("moveend", () => {
+      if (this.filterMode || this.useBakedTiles) return;
+      void (async () => {
+        if (shouldUseGrid(this.map)) {
+          await this.gridLoader.sync();
+          this.gridAvailable = this.gridAvailable || this.gridLoader.isReady();
+          if (this.gridLoader.isReady()) this.setDeltaPins([]);
+          this.applyVisibilityState();
+          return;
+        }
+        this.applyVisibilityState();
+        scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
+          this.setDeltaPins(pins);
+        });
+      })();
+    });
   }
 
   addLivePinIfVisible(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): boolean {
@@ -218,6 +250,7 @@ export class P5nMap {
   async initTilesFromManifest(): Promise<boolean> {
     try {
       const manifest = await fetchTileManifest(this.config.apiBase);
+      this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
       if (manifest.url) {
         this.config.tilesUrl = manifest.url.startsWith("pmtiles://")
           ? manifest.url
@@ -232,37 +265,48 @@ export class P5nMap {
     return false;
   }
 
-  /** Reload PMTiles after a dashboard bake (new manifest version). */
+  /** Reload grid/baked state after dashboard bake. */
   async reloadBakedTiles(): Promise<boolean> {
     try {
-      this.chunkLoader.clear();
-      this.setDeltaPins([]);
+      this.gridLoader.clear();
 
       const manifest = await fetchTileManifest(this.config.apiBase);
+      this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
+
       if (manifest.url) {
         const url = manifest.url.startsWith("pmtiles://") ? manifest.url : `pmtiles://${manifest.url}`;
         if (this.config.tilesUrl !== url || !this.map.getSource(this.pinsSourceId)) {
           this.config.tilesUrl = url;
           this.useBakedTiles = true;
-          for (const id of [`${this.pinsSourceId}-circles`, `${this.pinsSourceId}-symbols`]) {
+          for (const id of vectorPinLayerIds(this.pinsSourceId)) {
             if (this.map.getLayer(id)) this.map.removeLayer(id);
           }
           if (this.map.getSource(this.pinsSourceId)) this.map.removeSource(this.pinsSourceId);
           if (this.styleReady) await this.attachSources();
         }
       } else {
+        this.config.tilesUrl = null;
         this.useBakedTiles = false;
       }
 
-      await this.chunkLoader.sync();
-      return true;
+      if (!this.useBakedTiles) {
+        await this.loadViewportPins();
+      } else {
+        this.applyVisibilityState();
+      }
+      return this.useBakedTiles || this.pinCache.size > 0;
     } catch {
       return false;
     }
   }
 
   hasBakedTiles(): boolean {
-    return this.useBakedTiles || this.chunkLoader.loadedCount() > 0;
+    return this.useBakedTiles;
+  }
+
+  /** Geohash4 grid fallback when PMTiles manifest is absent. */
+  hasGridFallback(): boolean {
+    return this.gridAvailable;
   }
 
   async tryOfflineFirst(): Promise<boolean> {
@@ -338,7 +382,9 @@ export class P5nMap {
     this.activeTypeFilter = types;
     const layers = this.filterMode
       ? filteredLayerIds(this.filteredSourceId)
-      : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
+      : this.useBakedTiles
+        ? vectorPinLayerIds(this.pinsSourceId)
+        : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
     setTypeFilter(this.map, types, layers);
   }
 
@@ -381,46 +427,7 @@ export class P5nMap {
   }
 
   onPinClick(handler: (pin: { id: string; lat: number; lng: number; t: number }) => void): void {
-    const layers = clickableLayerIds(this.pinsSourceId, this.deltaSourceId, this.filteredSourceId);
-    const clusterLayers = [
-      `${this.deltaSourceId}-clusters`,
-      `${this.filteredSourceId}-clusters`,
-    ];
-
-    for (const layerId of clusterLayers) {
-      if (!this.map.getLayer(layerId)) continue;
-      this.map.on("click", layerId, (e) => {
-        const f = e.features?.[0];
-        if (!f?.properties?.cluster_id) return;
-        const src = this.map.getSource(
-          layerId.startsWith(this.filteredSourceId) ? this.filteredSourceId : this.deltaSourceId,
-        ) as maplibregl.GeoJSONSource;
-        const clusterId = Number(f.properties.cluster_id);
-        void src.getClusterExpansionZoom(clusterId).then((zoom) => {
-          if (f.geometry.type !== "Point") return;
-          this.map.easeTo({ center: f.geometry.coordinates as [number, number], zoom: zoom + 0.5 });
-        });
-      });
-    }
-
-    for (const layerId of layers) {
-      if (layerId.endsWith("-clusters")) continue;
-      this.map.on("click", layerId, (e) => {
-        const f = e.features?.[0];
-        if (!f || f.geometry.type !== "Point") return;
-        if (f.properties?.cluster_id) return;
-        const id = String(f.properties?.id ?? f.id ?? "");
-        if (!id) return;
-        const [lng, lat] = (f.geometry as GeoJSON.Point).coordinates;
-        handler({ id, lat, lng, t: Number(f.properties?.t ?? 3) });
-      });
-      this.map.on("mouseenter", layerId, () => {
-        this.map.getCanvas().style.cursor = "pointer";
-      });
-      this.map.on("mouseleave", layerId, () => {
-        this.map.getCanvas().style.cursor = "";
-      });
-    }
+    registerPinInteractions(this.map, handler);
   }
 }
 

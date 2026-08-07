@@ -130,9 +130,9 @@ function carouselHtml(photos: PlacePhoto[]): string {
   const slides = photos
     .map(
       (p, i) =>
-        `<a href="${escapeHtml(p.large)}" class="carousel-slide${i === 0 ? " active" : ""}" data-i="${i}">
-          <img src="${escapeHtml(p.large)}" alt="" loading="${i === 0 ? "eager" : "lazy"}" />
-        </a>`,
+        `<button type="button" class="carousel-slide${i === 0 ? " active" : ""}" data-i="${i}" data-pswp-src="${escapeHtml(p.large)}" aria-label="View photo ${i + 1}">
+          <img src="${escapeHtml(p.large)}" alt="" draggable="false" loading="${i === 0 ? "eager" : "lazy"}" />
+        </button>`,
     )
     .join("");
   const dots =
@@ -147,6 +147,41 @@ function carouselHtml(photos: PlacePhoto[]): string {
   </div>`;
 }
 
+/** Animated skeleton shown while place detail loads. */
+export function renderPlaceDetailSkeleton(): string {
+  return `<div class="detail-grab" aria-hidden="true"></div>
+  <div class="detail-skeleton">
+    <div class="sk-block sk-carousel"></div>
+    <header class="detail-head">
+      <div class="detail-title-row">
+        <div class="sk-block sk-icon"></div>
+        <div class="sk-title-stack">
+          <div class="sk-block sk-line sk-line-lg"></div>
+          <div class="sk-block sk-line sk-line-sm"></div>
+        </div>
+      </div>
+      <button class="btn-icon" id="btn-close-detail" type="button">✕</button>
+    </header>
+    <div class="detail-actions sk-actions">
+      <div class="sk-block sk-pill"></div>
+      <div class="sk-block sk-pill"></div>
+      <div class="sk-block sk-pill"></div>
+    </div>
+    <div class="detail-body">
+      <div class="sk-block sk-stars"></div>
+      <div class="fact-grid">
+        <div class="sk-block sk-fact"></div>
+        <div class="sk-block sk-fact"></div>
+        <div class="sk-block sk-fact"></div>
+        <div class="sk-block sk-fact"></div>
+      </div>
+      <div class="sk-block sk-line"></div>
+      <div class="sk-block sk-line"></div>
+      <div class="sk-block sk-line sk-line-short"></div>
+    </div>
+  </div>`;
+}
+
 export function renderPlaceDetail(data: PlaceDetail, defs: AttributeDef[], typeInt: number): string {
   const title = escapeHtml(String(data.name || data.place_id));
   const loc = [data.city, data.country].filter(Boolean).join(", ");
@@ -157,6 +192,8 @@ export function renderPlaceDetail(data: PlaceDetail, defs: AttributeDef[], typeI
   const reviews = data.reviews ?? [];
 
   let html = carouselHtml(photos);
+
+  html += `<div class="detail-grab" aria-hidden="true"></div>`;
 
   html += `<header class="detail-head">
     <div class="detail-title-row">
@@ -258,7 +295,20 @@ export function initPlaceDetailPanel(root: HTMLElement, data?: PlaceDetail): voi
     { passive: true },
   );
 
-  void initPhotoLightbox(carousel as HTMLElement, slides);
+  guardCarouselNavigation(carousel as HTMLElement);
+  initPhotoLightbox(carousel as HTMLElement, slides);
+}
+
+function guardCarouselNavigation(carousel: HTMLElement): void {
+  carousel.addEventListener(
+    "click",
+    (e) => {
+      if ((e.target as HTMLElement).closest(".carousel-slide")) {
+        e.preventDefault();
+      }
+    },
+    true,
+  );
 }
 
 function initDetailActions(root: HTMLElement, data: PlaceDetail): void {
@@ -299,10 +349,11 @@ function slideDimensionsFromImg(img: HTMLImageElement): { w: number; h: number }
   return null;
 }
 
-function cacheSlideDimensions(anchor: HTMLAnchorElement, w: number, h: number): void {
-  anchor.dataset.pswpWidth = String(w);
-  anchor.dataset.pswpHeight = String(h);
-  if (anchor.href) dimensionCache.set(anchor.href, { w, h });
+function cacheSlideDimensions(el: HTMLElement, w: number, h: number): void {
+  el.dataset.pswpWidth = String(w);
+  el.dataset.pswpHeight = String(h);
+  const src = el.dataset.pswpSrc;
+  if (src) dimensionCache.set(src, { w, h });
 }
 
 function probeImageDimensions(src: string): Promise<{ w: number; h: number } | null> {
@@ -328,21 +379,22 @@ function probeImageDimensions(src: string): Promise<{ w: number; h: number } | n
 async function ensureGalleryDimensions(slides: HTMLElement[]): Promise<void> {
   await Promise.all(
     slides.map(async (slide) => {
-      const anchor = slide as HTMLAnchorElement;
-      const img = anchor.querySelector("img");
+      const img = slide.querySelector("img");
       const fromImg = img ? slideDimensionsFromImg(img) : null;
       if (fromImg) {
-        cacheSlideDimensions(anchor, fromImg.w, fromImg.h);
+        cacheSlideDimensions(slide, fromImg.w, fromImg.h);
         return;
       }
-      const probed = await probeImageDimensions(anchor.href);
-      if (probed) cacheSlideDimensions(anchor, probed.w, probed.h);
+      const src = slide.dataset.pswpSrc;
+      if (!src) return;
+      const probed = await probeImageDimensions(src);
+      if (probed) cacheSlideDimensions(slide, probed.w, probed.h);
       if (img) {
         img.addEventListener(
           "load",
           () => {
             const loaded = slideDimensionsFromImg(img);
-            if (loaded) cacheSlideDimensions(anchor, loaded.w, loaded.h);
+            if (loaded) cacheSlideDimensions(slide, loaded.w, loaded.h);
           },
           { once: true },
         );
@@ -351,12 +403,12 @@ async function ensureGalleryDimensions(slides: HTMLElement[]): Promise<void> {
   );
 }
 
-async function initPhotoLightbox(gallery: HTMLElement, slides: HTMLElement[]): Promise<void> {
+function initPhotoLightbox(gallery: HTMLElement, slides: HTMLElement[]): void {
   activeLightbox?.destroy();
-  await ensureGalleryDimensions(slides);
+
   activeLightbox = new PhotoSwipeLightbox({
     gallery,
-    children: "a.carousel-slide",
+    children: ".carousel-slide",
     pswpModule: () => import("photoswipe"),
     showHideAnimationType: "zoom",
     initialZoomLevel: "fit",
@@ -368,10 +420,14 @@ async function initPhotoLightbox(gallery: HTMLElement, slides: HTMLElement[]): P
     closeOnVerticalDrag: true,
     padding: { top: 20, bottom: 40, left: 20, right: 20 },
   });
-  activeLightbox.addFilter("domItemData", (itemData, _element, linkEl) => {
-    const w = linkEl.dataset.pswpWidth ? Number(linkEl.dataset.pswpWidth) : 0;
-    const h = linkEl.dataset.pswpHeight ? Number(linkEl.dataset.pswpHeight) : 0;
-    const img = linkEl.querySelector("img");
+  activeLightbox.addFilter("domItemData", (itemData, _element, el) => {
+    const link = el as HTMLElement;
+    const src = link.dataset.pswpSrc ?? itemData.src;
+    if (src) itemData.src = src;
+
+    const w = link.dataset.pswpWidth ? Number(link.dataset.pswpWidth) : 0;
+    const h = link.dataset.pswpHeight ? Number(link.dataset.pswpHeight) : 0;
+    const img = link.querySelector("img");
     const fromImg = img ? slideDimensionsFromImg(img) : null;
     const width = fromImg?.w || w;
     const height = fromImg?.h || h;
@@ -405,6 +461,7 @@ async function initPhotoLightbox(gallery: HTMLElement, slides: HTMLElement[]): P
     });
   });
   activeLightbox.init();
+  void ensureGalleryDimensions(slides);
 }
 
 export async function loadPlaceDetail(apiBase: string, placeId: string, withReviews: boolean): Promise<PlaceDetail> {

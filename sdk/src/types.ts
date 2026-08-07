@@ -29,6 +29,8 @@ export interface TileManifest {
   bake_total?: number;
   bake_error?: string | null;
   bake_started_at?: string | null;
+  bake_phase?: string | null;
+  grid_cells?: number;
 }
 
 export interface AttributeDef {

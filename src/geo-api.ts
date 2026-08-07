@@ -1,4 +1,4 @@
-import { listAttributeDefs, listPlacesGroupedByGeohash4, listPlacesInBbox, searchPlacesPage } from "./db";
+import { listAttributeDefs, listGridCells, listGridCellsInBbox, listPlacesGroupedByGeohash4, listPlacesInBbox, searchPlacesPage } from "./db";
 import type { Env, SearchPin } from "./types";
 
 const PAGE_SIZE = 50;
@@ -70,6 +70,32 @@ export async function handleEnrich(env: Env, url: URL): Promise<Response> {
   const pins = await enrichPlaces(env, bbox.west, bbox.south, bbox.east, bbox.north, since);
   return json({ pins, count: pins.length }, 200, {
     "cache-control": "no-store",
+  });
+}
+
+export async function handleGridPins(env: Env, url: URL): Promise<Response> {
+  const bbox = parseBbox(url);
+  if (bbox) {
+    const limit = Math.min(500, Number(url.searchParams.get("limit") || 400));
+    const grid = await listGridCellsInBbox(env, bbox.west, bbox.south, bbox.east, bbox.north, limit);
+    let pinCount = 0;
+    for (const c of grid) pinCount += c.count;
+    return json({ cells: grid, count: grid.length, pin_count: pinCount }, 200, {
+      "cache-control": "public, max-age=3600",
+    });
+  }
+
+  const raw = url.searchParams.get("g4") ?? "";
+  const cells = [...new Set(raw.split(",").map((s) => s.trim()).filter((s) => /^[0-9b-hj-km-np-z]{4}$/.test(s)))];
+  if (cells.length === 0) return json({ error: "g4 required: comma-separated geohash4 cells" }, 400);
+  if (cells.length > 120) return json({ error: "max 120 cells per request" }, 400);
+
+  const grid = await listGridCells(env, cells);
+  let pinCount = 0;
+  for (const c of grid) pinCount += c.count;
+
+  return json({ cells: grid, count: grid.length, pin_count: pinCount }, 200, {
+    "cache-control": "public, max-age=3600",
   });
 }
 
@@ -146,21 +172,28 @@ export function handleStreamingSearch(env: Env, url: URL): Response {
 export async function handleTileManifest(env: Env, request: Request): Promise<Response> {
   const { readDb } = await import("./db");
   const manifest = await readDb(env).prepare("SELECT * FROM tile_manifest WHERE id = 1").first();
-  const base = env.TILES_PUBLIC_URL || new URL(request.url).origin;
+  const reqUrl = new URL(request.url);
+  const hostHeader = request.headers.get("Host");
+  let base = reqUrl.origin;
+  if (hostHeader && (hostHeader.startsWith("localhost") || hostHeader.startsWith("127.0.0.1"))) {
+    base = `${reqUrl.protocol}//${hostHeader}`;
+  }
   const version = (manifest as { version?: number })?.version ?? 0;
   const r2Key = (manifest as { r2_key?: string })?.r2_key;
-  const url = r2Key ? `${base}/tiles/${r2Key}` : null;
+  const tilesUrl = r2Key ? `${base}/tiles/${r2Key}` : null;
   return json({
     version,
     built_at: (manifest as { built_at?: string })?.built_at ?? null,
     place_count: (manifest as { place_count?: number })?.place_count ?? 0,
+    grid_cells: (manifest as { grid_cells?: number })?.grid_cells ?? 0,
     bytes: (manifest as { bytes?: number })?.bytes ?? 0,
-    url,
+    url: tilesUrl,
     bake_status: (manifest as { bake_status?: string })?.bake_status ?? "idle",
     bake_progress: (manifest as { bake_progress?: number })?.bake_progress ?? 0,
     bake_total: (manifest as { bake_total?: number })?.bake_total ?? 0,
     bake_error: (manifest as { bake_error?: string | null })?.bake_error ?? null,
     bake_started_at: (manifest as { bake_started_at?: string | null })?.bake_started_at ?? null,
+    bake_phase: (manifest as { bake_phase?: string | null })?.bake_phase ?? null,
   });
 }
 

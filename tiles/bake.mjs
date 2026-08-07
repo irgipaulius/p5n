@@ -20,15 +20,18 @@ if (!existsSync(inFile)) {
 const version = Date.now();
 const outFile = join(outDir, `pins-v${version}.pmtiles`);
 
-console.log("Running tippecanoe…");
+console.log("Running tippecanoe (cluster-preserving heatmap LOD)…");
 execSync(
   [
     "tippecanoe",
     "-o", outFile,
     "-zg",
-    "--drop-densest-as-needed",
+    "-l", "pins",
+    "-r1",
+    "--cluster-densest-as-needed",
+    "--cluster-distance=10",
     "--extend-zooms-if-still-dropping",
-    "--order-by=rating",
+    "--drop-densest-as-needed",
     "--include=id",
     "--include=t",
     "--force",

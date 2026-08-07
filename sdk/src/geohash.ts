@@ -56,3 +56,32 @@ export function geohash4CellsForBbox(
   }
   return [...set];
 }
+
+/** Bounding box for a geohash prefix (matches server grid cells). */
+export function geohash4Bbox(g4: string): { west: number; south: number; east: number; north: number } {
+  let minLat = -90;
+  let maxLat = 90;
+  let minLng = -180;
+  let maxLng = 180;
+  let even = true;
+
+  for (const ch of g4) {
+    const idx = BASE32.indexOf(ch);
+    if (idx < 0) continue;
+    for (let bit = 4; bit >= 0; bit -= 1) {
+      const mask = 1 << bit;
+      if (even) {
+        const mid = (minLng + maxLng) / 2;
+        if (idx & mask) minLng = mid;
+        else maxLng = mid;
+      } else {
+        const mid = (minLat + maxLat) / 2;
+        if (idx & mask) minLat = mid;
+        else maxLat = mid;
+      }
+      even = !even;
+    }
+  }
+
+  return { west: minLng, south: minLat, east: maxLng, north: maxLat };
+}

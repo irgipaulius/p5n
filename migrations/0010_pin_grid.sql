@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS pin_grid (
+  g4 TEXT PRIMARY KEY,
+  count INTEGER NOT NULL,
+  lat REAL NOT NULL,
+  lng REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pin_grid_count ON pin_grid(count);
+
+ALTER TABLE tile_manifest ADD COLUMN grid_cells INTEGER NOT NULL DEFAULT 0;

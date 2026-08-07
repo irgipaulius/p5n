@@ -35,7 +35,7 @@ export function chunkBbox(id: string): { west: number; south: number; east: numb
 }
 
 /** Load regional PMTiles once the map is zoomed in enough. */
-export const CHUNK_LOAD_MIN_ZOOM = 6;
+export const CHUNK_LOAD_MIN_ZOOM = 3;
 
-/** Fetch individual pins (API / delta) only when zoomed in further. */
-export const PIN_FETCH_MIN_ZOOM = 8;
+/** Fetch live pins from API (clustered) — low threshold; GPU clustering handles density. */
+export const PIN_FETCH_MIN_ZOOM = 4;

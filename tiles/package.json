@@ -5,7 +5,8 @@
   "scripts": {
     "export": "node export.mjs",
     "bake": "node bake.mjs",
+    "verify": "node verify.mjs",
     "upload": "node upload.mjs",
-    "all": "npm run export && npm run bake"
+    "all": "npm run export && npm run bake && npm run verify"
   }
 }

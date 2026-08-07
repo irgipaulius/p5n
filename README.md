@@ -109,9 +109,9 @@ Vector tiles (Mapbox Vector Tile / protobuf):
 
 Never ship megabytes when millimeters suffice.
 
-### 5. Importance ranking per zoom
+### 5. Density LOD via tippecanoe clustering
 
-`tippecanoe --order-by=rating --drop-densest-as-needed`: at low zoom you see the **best** pins, not all 500k. Same trick Google uses for POI visibility.
+Low-zoom density comes from **dashboard Bake tiles** (worker builds PMTiles via geojson-vt → MVT, uploads to R2 or D1). MapLibre heatmap weights by `point_count` on cluster features; high zoom fades to individual `{id,t}` circles/symbols. Optional offline `tiles/` scripts remain for CI — not required for normal use.
 
 ### 6. Streaming NDJSON search
 

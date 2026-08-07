@@ -32,6 +32,7 @@ import {
 import {
   handleAttributes,
   handleBboxPins,
+  handleGridPins,
   handleEnrich,
   handleIpGeo,
   handleStreamingSearch,
@@ -40,7 +41,7 @@ import {
 } from "./geo-api";
 import { buildEuropeGrid } from "./placeTypes";
 import { pauseScrape, resumeScrape, startScrape } from "./scrape";
-import { getTileBakeStatus, listTileChunks, runTileBake, startTileBake } from "./tile-bake";
+import { getTileBakeStatus, listTileChunks, readTileBlob, runTileBake, startTileBake } from "./tile-bake";
 import { ensureSchema } from "./schema-ensure";
 import type { CommentApi, Env } from "./types";
 
@@ -72,6 +73,10 @@ export default {
 
       if (request.method === "GET" && pathname === "/api/pins/bbox") {
         return handleBboxPins(env, url);
+      }
+
+      if (request.method === "GET" && pathname === "/api/pins/grid") {
+        return handleGridPins(env, url);
       }
 
       if (request.method === "GET" && pathname === "/api/pins/tiles") {
@@ -158,7 +163,7 @@ export default {
       }
 
       if (request.method === "GET" && pathname.startsWith("/tiles/")) {
-        return serveTile(env, pathname.slice("/tiles/".length));
+        return serveTile(request, env, pathname.slice("/tiles/".length));
       }
 
       if (request.method === "GET" && pathname === "/api/events") {
@@ -382,20 +387,32 @@ function sseStream(env: Env): Response {
   });
 }
 
-async function serveTile(env: Env, key: string): Promise<Response> {
-  if (!env.TILES) {
-    return json({ error: "R2 TILES binding not configured" }, 503);
-  }
-  const obj = await env.TILES.get(key);
-  if (!obj) return json({ error: "not found" }, 404);
+async function serveTile(request: Request, env: Env, key: string): Promise<Response> {
+  const blob = await readTileBlob(env, key);
+  if (!blob) return json({ error: "not found" }, 404);
+
   const headers = new Headers();
-  obj.writeHttpMetadata(headers);
   headers.set("cache-control", "public, max-age=31536000, immutable");
   headers.set("accept-ranges", "bytes");
-  if (!headers.has("content-type")) {
-    headers.set("content-type", key.endsWith(".json") ? "application/json" : "application/octet-stream");
+  headers.set("content-type", "application/vnd.pmtiles");
+
+  const range = request.headers.get("Range");
+  if (range) {
+    const m = range.match(/bytes=(\d+)-(\d*)/);
+    if (m) {
+      const start = Number(m[1]);
+      const end = m[2] ? Number(m[2]) : blob.bytes - 1;
+      if (start <= end && end < blob.bytes) {
+        const slice = blob.data.slice(start, end + 1);
+        headers.set("content-range", `bytes ${start}-${end}/${blob.bytes}`);
+        headers.set("content-length", String(slice.byteLength));
+        return new Response(slice, { status: 206, headers });
+      }
+    }
   }
-  return new Response(obj.body, { headers });
+
+  headers.set("content-length", String(blob.bytes));
+  return new Response(blob.data, { headers });
 }
 
 function serveAppIndex(): Response {

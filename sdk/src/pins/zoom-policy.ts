@@ -1,14 +1,14 @@
 import type maplibregl from "maplibre-gl";
-import { CHUNK_LOAD_MIN_ZOOM, PIN_FETCH_MIN_ZOOM } from "../../../shared/tile-chunks";
+import { GRID_MAX_ZOOM, PIN_FETCH_MIN_ZOOM } from "../../../shared/pin-zoom-tiers";
 
-export { CHUNK_LOAD_MIN_ZOOM, PIN_FETCH_MIN_ZOOM };
+export { GRID_MAX_ZOOM, PIN_FETCH_MIN_ZOOM };
 
 export function mapZoom(map: maplibregl.Map): number {
   return map.getZoom();
 }
 
-export function shouldLoadChunks(map: maplibregl.Map): boolean {
-  return mapZoom(map) >= CHUNK_LOAD_MIN_ZOOM;
+export function shouldUseGrid(map: maplibregl.Map): boolean {
+  return mapZoom(map) < GRID_MAX_ZOOM;
 }
 
 export function shouldFetchPins(map: maplibregl.Map): boolean {

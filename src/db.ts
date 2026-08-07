@@ -819,6 +819,61 @@ export async function listPlacesGroupedByGeohash4(
   return grouped;
 }
 
+export interface GridCell {
+  g4: string;
+  count: number;
+  lat: number;
+  lng: number;
+}
+
+/** Pre-aggregated geohash4 counts within a map viewport. */
+export async function listGridCellsInBbox(
+  env: Env,
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+  limit = 400,
+): Promise<GridCell[]> {
+  const res = await readDb(env)
+    .prepare(
+      `SELECT g4, count, lat, lng FROM pin_grid
+       WHERE lat >= ? AND lat <= ? AND lng >= ? AND lng <= ?
+       ORDER BY count DESC
+       LIMIT ?`,
+    )
+    .bind(south, north, west, east, limit)
+    .all<GridCell>();
+  return res.results ?? [];
+}
+
+/** Lookup specific geohash4 cells. */
+export async function listGridCells(env: Env, g4cells: string[]): Promise<GridCell[]> {
+  if (g4cells.length === 0) return [];
+  const placeholders = g4cells.map(() => "?").join(",");
+  const res = await readDb(env)
+    .prepare(`SELECT g4, count, lat, lng FROM pin_grid WHERE g4 IN (${placeholders})`)
+    .bind(...g4cells)
+    .all<GridCell>();
+  return res.results ?? [];
+}
+
+/** Rebuild pin_grid from places — one GROUP BY, scales to 1M+ pins at bake time. */
+export async function rebuildPinGrid(db: D1Database): Promise<number> {
+  await db.prepare("DELETE FROM pin_grid").run();
+  await db
+    .prepare(
+      `INSERT INTO pin_grid (g4, count, lat, lng)
+       SELECT geohash4, COUNT(*), AVG(lat), AVG(lng)
+       FROM places
+       WHERE lat IS NOT NULL AND geohash4 IS NOT NULL AND geohash4 != ''
+       GROUP BY geohash4`,
+    )
+    .run();
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM pin_grid").first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 export async function enrichPlaces(
   env: Env,
   west: number,
@@ -1173,12 +1228,13 @@ export async function updateTileManifest(
   placeCount: number,
   r2Key: string,
   bytes: number,
+  gridCells = 0,
 ): Promise<void> {
   await db
     .prepare(
-      `UPDATE tile_manifest SET version = ?, built_at = ?, place_count = ?, r2_key = ?, bytes = ? WHERE id = 1`,
+      `UPDATE tile_manifest SET version = ?, built_at = ?, place_count = ?, r2_key = ?, bytes = ?, grid_cells = ? WHERE id = 1`,
     )
-    .bind(version, nowIso(), placeCount, r2Key, bytes)
+    .bind(version, nowIso(), placeCount, r2Key, bytes, gridCells)
     .run();
 }
 

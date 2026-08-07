@@ -1,7 +1,6 @@
 import type maplibregl from "maplibre-gl";
+import { addGeoJsonPinLayers, PIN_CLUSTER_SOURCE_OPTS, removeGeoJsonPinLayers } from "../layers/pins";
 import { chunkIdsForBbox } from "../../../shared/tile-chunks";
-import { addPinLayers } from "../layers/pins";
-import { addPinsVectorSource } from "../map-core";
 import { shouldLoadChunks, viewportBbox } from "./zoom-policy";
 
 export interface ChunkManifestEntry {
@@ -9,6 +8,7 @@ export interface ChunkManifestEntry {
   url: string;
   place_count: number;
   version: number;
+  format?: string;
 }
 
 export class ChunkTileLoader {
@@ -41,9 +41,11 @@ export class ChunkTileLoader {
       let added = 0;
       for (const chunk of data.chunks ?? []) {
         if (this.loaded.has(chunk.chunk_id)) continue;
-        this.attachChunk(chunk);
-        this.loaded.add(chunk.chunk_id);
-        added += 1;
+        const ok = await this.attachChunk(chunk);
+        if (ok) {
+          this.loaded.add(chunk.chunk_id);
+          added += 1;
+        }
       }
       return added;
     } finally {
@@ -51,19 +53,34 @@ export class ChunkTileLoader {
     }
   }
 
-  private attachChunk(chunk: ChunkManifestEntry): void {
+  private async attachChunk(chunk: ChunkManifestEntry): Promise<boolean> {
     const sourceId = `pins-chunk-${chunk.chunk_id}`;
-    const url = chunk.url.startsWith("pmtiles://") ? chunk.url : `pmtiles://${chunk.url}`;
-    addPinsVectorSource(this.map, sourceId, url);
-    addPinLayers(this.map, sourceId);
+    if (this.map.getSource(sourceId)) return true;
+
+    this.map.addSource(sourceId, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+      promoteId: "id",
+      ...PIN_CLUSTER_SOURCE_OPTS,
+    });
+    addGeoJsonPinLayers(this.map, sourceId);
+
+    const resp = await fetch(chunk.url);
+    if (!resp.ok) {
+      removeGeoJsonPinLayers(this.map, sourceId);
+      if (this.map.getSource(sourceId)) this.map.removeSource(sourceId);
+      return false;
+    }
+    const geojson = (await resp.json()) as GeoJSON.FeatureCollection;
+    const src = this.map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+    src?.setData(geojson);
+    return (geojson.features?.length ?? 0) > 0;
   }
 
   clear(): void {
     for (const id of [...this.loaded]) {
       const sourceId = `pins-chunk-${id}`;
-      for (const layerId of [`${sourceId}-circles`, `${sourceId}-symbols`]) {
-        if (this.map.getLayer(layerId)) this.map.removeLayer(layerId);
-      }
+      removeGeoJsonPinLayers(this.map, sourceId);
       if (this.map.getSource(sourceId)) this.map.removeSource(sourceId);
     }
     this.loaded.clear();

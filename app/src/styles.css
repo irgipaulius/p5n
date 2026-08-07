@@ -13,18 +13,26 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+html, body, #app {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  overscroll-behavior: none;
+}
 
 .layout {
   position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 #map {
   position: absolute;
   inset: 0;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 .glass {
@@ -40,51 +48,79 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   z-index: 5;
 }
 
-/* Search bar — top center */
-.float-search {
+/* Top bar — search + filters */
+.top-bar {
+  position: absolute;
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
+  width: min(680px, calc(100% - 32px));
   display: flex;
   align-items: center;
   gap: 10px;
-  width: min(640px, calc(100% - 32px));
-  padding: 10px 14px;
-  border-radius: 999px;
-  z-index: 12;
+  z-index: 16;
+  pointer-events: none;
+}
+
+.top-bar > * {
   pointer-events: auto;
 }
 
-.float-search input {
+.search-field {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  height: 48px;
+  border-radius: 999px;
+  cursor: text;
+}
+
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
   border: none;
   background: transparent;
   color: var(--text);
   font-size: 16px;
   outline: none;
-  min-width: 0;
   min-height: 44px;
+  padding: 0;
+  margin: 0;
+  -webkit-appearance: none;
+  appearance: none;
   -webkit-user-select: text;
   user-select: text;
   touch-action: manipulation;
 }
 
-.float-search input::placeholder {
+.search-field input::placeholder {
   color: var(--muted);
   opacity: 1;
 }
 
-.search-meta {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.float-search .icon {
+.search-field .icon {
   width: 20px;
   height: 20px;
   color: var(--muted);
   flex-shrink: 0;
+  pointer-events: none;
+}
+
+.search-meta {
+  position: absolute;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(680px, calc(100% - 32px));
+  margin: 0;
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--muted);
+  z-index: 16;
   pointer-events: none;
 }
 
@@ -152,19 +188,22 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
 }
 
 /* Filters button */
-.float-filters-btn {
-  right: 16px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
+.top-bar .float-filters-btn {
+  position: static;
+  transform: none;
+  flex-shrink: 0;
+  height: 48px;
+  margin: 0;
+  padding: 0 14px;
+  border-radius: 14px;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
-  border-radius: 14px;
   color: var(--text);
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
+  border: 1px solid var(--border);
 }
 
 .float-filters-btn .icon {
@@ -385,6 +424,10 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   z-index: 15;
 }
 
+.detail-grab {
+  display: none;
+}
+
 @media (max-width: 640px) {
   .float-detail {
     right: 0;
@@ -392,10 +435,103 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
     width: 100%;
     max-height: 85vh;
     border-radius: 16px 16px 0 0;
+    transition: transform 0.22s ease;
+  }
+
+  .float-detail.detail-dragging {
+    transition: none;
+  }
+
+  .detail-grab {
+    display: block;
+    width: 40px;
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.45);
+    margin: 10px auto 4px;
+    flex-shrink: 0;
   }
 }
 
 .float-detail.open { display: block; }
+
+/* Skeleton loading state */
+@keyframes sk-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.sk-block {
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    rgba(51, 65, 85, 0.55) 25%,
+    rgba(71, 85, 105, 0.85) 50%,
+    rgba(51, 65, 85, 0.55) 75%
+  );
+  background-size: 200% 100%;
+  animation: sk-shimmer 1.4s ease-in-out infinite;
+}
+
+.detail-skeleton .sk-carousel {
+  height: 180px;
+  border-radius: 0;
+  margin: 0;
+}
+
+.detail-skeleton .sk-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.sk-title-stack {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sk-line {
+  height: 14px;
+  width: 100%;
+}
+
+.sk-line-lg {
+  height: 18px;
+  width: 72%;
+}
+
+.sk-line-sm {
+  width: 48%;
+}
+
+.sk-line-short {
+  width: 56%;
+}
+
+.sk-stars {
+  height: 22px;
+  width: 140px;
+  margin-bottom: 12px;
+}
+
+.sk-fact {
+  height: 52px;
+}
+
+.sk-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px 12px;
+}
+
+.sk-pill {
+  height: 36px;
+  flex: 1;
+  border-radius: 10px;
+}
 
 .detail-head {
   display: flex;
@@ -582,8 +718,16 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   transition: opacity 0.2s;
   pointer-events: none;
   display: block;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: none;
   text-decoration: none;
   color: inherit;
+  font: inherit;
+  cursor: zoom-in;
 }
 
 .carousel-slide.active {
@@ -827,37 +971,43 @@ html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--
   .mobile-only { display: flex !important; }
   .desktop-only { display: none !important; }
 
-  .float-search {
-    width: calc(100% - 88px);
-    top: 12px;
+  .top-bar {
+    top: max(12px, env(safe-area-inset-top, 0px));
     left: 12px;
+    right: 12px;
+    width: auto;
     transform: none;
-    border-radius: 16px;
-    padding: 8px 12px;
-    z-index: 16;
-    /* iOS Safari: backdrop-filter blocks input focus/taps */
+    gap: 8px;
+  }
+
+  .search-field {
+    border-radius: 14px;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: var(--glass-strong);
-    flex-wrap: nowrap;
   }
 
-  .float-search input {
-    font-size: 16px;
+  .top-bar .float-filters-btn {
+    padding: 0 12px;
+    min-width: 48px;
+    justify-content: center;
   }
 
-  .float-search .search-meta {
-    width: 100%;
-    order: 4;
-    padding-left: 30px;
+  .top-bar .float-filters-btn .filters-label {
+    display: none;
   }
 
-  .float-filters-btn {
+  .search-meta {
+    top: calc(max(12px, env(safe-area-inset-top, 0px)) + 56px);
+    left: 12px;
     right: 12px;
-    top: 50%;
-    bottom: auto;
-    transform: translateY(-50%);
-    padding: 12px 14px;
+    width: auto;
+    transform: none;
+  }
+
+  .float-filters-btn .icon {
+    width: 18px;
+    height: 18px;
   }
 
   .float-install {

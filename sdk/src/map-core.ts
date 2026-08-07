@@ -1,6 +1,8 @@
 import maplibregl from "maplibre-gl";
 import { Protocol } from "pmtiles";
+import { PIN_CLUSTER_SOURCE_OPTS } from "./layers/pins";
 import type { P5nConfig } from "./types";
+import { MaplibrePreload } from "./maplibre-preload.js";
 
 let protocolRegistered = false;
 
@@ -40,6 +42,7 @@ export async function fetchTileManifest(apiBase: string): Promise<{
   version: number;
   url: string | null;
   place_count: number;
+  grid_cells?: number;
 }> {
   const resp = await fetch(`${apiBase}/api/tiles/manifest`);
   if (!resp.ok) throw new Error(`manifest ${resp.status}`);
@@ -48,7 +51,7 @@ export async function fetchTileManifest(apiBase: string): Promise<{
 
 export function createMap(container: HTMLElement, config: P5nConfig): maplibregl.Map {
   registerPmtilesProtocol();
-  return new maplibregl.Map({
+  const map = new maplibregl.Map({
     container,
     style: basemapStyle(config.dark ?? true),
     center: [10, 50],
@@ -56,7 +59,16 @@ export function createMap(container: HTMLElement, config: P5nConfig): maplibregl
     maxPitch: 60,
     antialias: false,
     fadeDuration: 0,
+    maxTileCacheSize: 256,
+    maxTileCacheZoomLevels: 6,
   });
+  installMapPreload(map);
+  return map;
+}
+
+/** Prefetch tiles during flyTo/easeTo/panTo/zoomTo (supports pmtiles:// protocol). */
+export function installMapPreload(map: maplibregl.Map): MaplibrePreload {
+  return new MaplibrePreload(map, { async: true, burstLimit: 250, useTile: true });
 }
 
 export function addPinsVectorSource(
@@ -78,9 +90,7 @@ export function addDeltaGeoJsonSource(map: maplibregl.Map, sourceId = "pins-delt
     type: "geojson",
     data: { type: "FeatureCollection", features: [] },
     promoteId: "id",
-    cluster: true,
-    clusterMaxZoom: 11,
-    clusterRadius: 48,
+    ...PIN_CLUSTER_SOURCE_OPTS,
   });
 }
 

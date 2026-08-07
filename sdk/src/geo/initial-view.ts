@@ -14,7 +14,7 @@ export interface InitialViewOptions {
   center?: { lat: number; lng: number; zoom?: number };
 }
 
-const DEFAULT: InitialView = { lat: 50, lng: 10, zoom: 5, source: "default" };
+const DEFAULT: InitialView = { lat: 40, lng: -3, zoom: 5, source: "default" };
 
 async function fetchIpView(apiBase: string): Promise<InitialView | null> {
   try {

@@ -1,8 +1,10 @@
 import { P5nMap, TYPE_LABELS, attrIcon, typeIconSvg, typeToInt, type PinFeature } from "@p5n/sdk";
 import maplibregl from "maplibre-gl";
 import { installDrawerSwipe } from "./drawer-swipe";
+import { installDetailSwipe } from "./detail-swipe";
+import { installPullRefreshGuard } from "./pull-guard";
 import { canShowInstallButton, promptInstall, watchInstallPrompt } from "./install-app";
-import { initPlaceDetailPanel, loadPlaceDetail, parsePlaceIdFromPath, renderPlaceDetail } from "./place-detail";
+import { initPlaceDetailPanel, loadPlaceDetail, parsePlaceIdFromPath, renderPlaceDetail, renderPlaceDetailSkeleton } from "./place-detail";
 
 const API_BASE = import.meta.env.DEV ? "" : "";
 
@@ -18,12 +20,19 @@ export function mountApp(root: HTMLElement): void {
     <div class="layout">
       <div id="map"></div>
 
-      <div class="float float-search glass">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 10.5 5 15 7.01 15 9.5 12.99 14 10.5 14z"/></svg>
-        <input type="search" id="search" placeholder="Search in this area…" autocomplete="off" />
+      <header class="top-bar">
+        <label class="search-field glass" for="search">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 10.5 5 15 7.01 15 9.5 12.99 14 10.5 14z"/></svg>
+          <input type="text" inputmode="search" enterkeyhint="search" id="search" placeholder="Search in this area…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        </label>
         <button type="button" id="btn-search" class="btn btn-accent desktop-only">Search</button>
-        <span class="search-meta" id="search-meta"></span>
-      </div>
+        <button type="button" class="float-filters-btn glass" id="btn-filters" aria-expanded="false">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+          <span class="filters-label">Filters</span>
+        </button>
+      </header>
+      <p class="search-meta" id="search-meta" aria-live="polite"></p>
+
 
       <button type="button" class="float float-admin-toggle glass mobile-only" id="btn-admin-toggle" aria-expanded="false" aria-label="Scraper &amp; log">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
@@ -38,18 +47,13 @@ export function mountApp(root: HTMLElement): void {
         <div class="float float-scrape glass">
           <button type="button" id="btn-start" class="btn btn-accent">Start scrape</button>
           <button type="button" id="btn-toggle" class="btn">Pause</button>
-          <button type="button" id="btn-bake" class="btn" title="Export D1 → PMTiles on R2">Bake tiles</button>
+          <button type="button" id="btn-bake" class="btn" title="Build PMTiles heatmap pyramid and publish to tile storage">Bake tiles</button>
           <div class="stats" id="stats">…</div>
           <span class="status" id="status"></span>
           <span class="bake-status" id="bake-status"></span>
         </div>
         <div class="float float-log glass" id="log"></div>
       </div>
-
-      <button type="button" class="float float-filters-btn glass" id="btn-filters" aria-expanded="false">
-        <svg class="icon" viewBox="0 0 24 24"><path fill="currentColor" d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
-        Filters
-      </button>
 
       <aside class="float float-drawer glass" id="drawer" aria-hidden="true">
         <div class="drawer-handle" aria-hidden="true"></div>
@@ -125,6 +129,7 @@ export function mountApp(root: HTMLElement): void {
   let searchGeneration = 0;
 
   const p5n = new P5nMap(mapEl, { apiBase: API_BASE, dark: true });
+  installPullRefreshGuard(mapEl);
   p5n.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
   p5n.map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: true }), "bottom-right");
   p5n.map.addControl(new maplibregl.ScaleControl(), "bottom-left");
@@ -166,13 +171,13 @@ export function mountApp(root: HTMLElement): void {
     p5n.onMoveEndEnrich();
     p5n.map.on("moveend", () => {
       scheduleViewportSearch(450);
-      const hint = p5n.pinZoomHint();
-      if (hint && !hasAdvancedFilters()) searchMeta.textContent = hint;
     });
-    const n = p5n.hasBakedTiles() ? 0 : await p5n.loadViewportPins();
+    const n = await p5n.loadViewportPins();
     statusEl.textContent = p5n.hasBakedTiles()
-      ? "baked tiles"
-      : n
+      ? "PMTiles loaded"
+      : p5n.hasGridFallback()
+        ? "grid fallback"
+        : n
         ? `${n} pins nearby`
         : view.source === "place"
           ? "shared place"
@@ -202,7 +207,7 @@ export function mountApp(root: HTMLElement): void {
 
     if (opts.pin) p5n.selectPin(opts.pin);
     detailEl.classList.add("open");
-    detailEl.innerHTML = `<header class="detail-head"><h2>Loading…</h2><button class="btn-icon" id="btn-close-detail">✕</button></header><p class="muted">Fetching place…</p>`;
+    detailEl.innerHTML = renderPlaceDetailSkeleton();
     detailEl.querySelector("#btn-close-detail")?.addEventListener("click", closeDetail);
 
     try {
@@ -229,11 +234,14 @@ export function mountApp(root: HTMLElement): void {
 
   function closeDetail(): void {
     detailEl.classList.remove("open");
+    detailEl.style.transform = "";
     p5n.selectPin(null);
     if (parsePlaceIdFromPath()) {
       history.pushState(null, "", "/");
     }
   }
+
+  installDetailSwipe(detailEl, closeDetail);
 
   window.addEventListener("popstate", () => {
     const id = parsePlaceIdFromPath();
@@ -520,10 +528,10 @@ export function mountApp(root: HTMLElement): void {
         ? `<span>${s.pass.done}/${s.pass.total} cells</span>`
         : "";
     const tm = s.tile_manifest;
-    const bakedMb = tm?.bytes ? (tm.bytes / (1024 * 1024)).toFixed(1) : null;
+    const gridCells = (tm as { grid_cells?: number })?.grid_cells ?? 0;
     const bakedLine =
       tm?.version && tm.version > 0
-        ? `<span class="stats-baked" title="PMTiles v${tm.version}">${tm.place_count ?? 0} baked${bakedMb ? ` · ${bakedMb} MB` : ""}</span>`
+        ? `<span class="stats-baked" title="PMTiles v${tm.version}">${tm.place_count ?? 0} pins · ${tm.bytes ? `${(tm.bytes / 1024 / 1024).toFixed(1)} MB MVT` : `${gridCells.toLocaleString()} grid cells`}</span>`
         : "";
     statsEl.innerHTML = `<span>${s.places ?? 0} pins</span><span class="${dbClass}">${dbMb.toFixed(1)} MB</span><span>${s.jobs?.pending ?? 0} queue</span>${passLine}${bakedLine}`;
     btnToggle.textContent = scraping ? "Pause" : "Resume";
@@ -548,9 +556,11 @@ export function mountApp(root: HTMLElement): void {
     bake_progress?: number;
     bake_total?: number;
     bake_error?: string | null;
+    bake_phase?: string | null;
     version?: number;
     place_count?: number;
     bytes?: number;
+    grid_cells?: number;
   }): void {
     const status = tm?.bake_status ?? "idle";
     baking = status === "running";
@@ -558,13 +568,21 @@ export function mountApp(root: HTMLElement): void {
 
     if (status === "running") {
       wasBaking = true;
-      const done = tm?.bake_progress ?? 0;
-      const total = tm?.bake_total ?? 0;
-      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-      const phase = total > 0 && done >= total ? "tiling…" : "exporting…";
-      bakeStatusEl.textContent = `baking ${phase} ${done.toLocaleString()}${total ? ` / ${total.toLocaleString()} (${pct}%)` : ""}`;
+      const pct = tm?.bake_progress ?? 0;
+      const phase = tm?.bake_phase ?? "working";
+      const phaseLabel =
+        phase === "grid"
+          ? "indexing grid"
+          : phase === "export"
+            ? "exporting pins"
+            : phase === "tile"
+              ? "building MVT"
+              : phase === "upload"
+                ? "uploading"
+                : "baking";
+      bakeStatusEl.textContent = `${phaseLabel}… ${pct}%`;
       bakeStatusEl.className = "bake-status baking";
-      statusEl.textContent = "baking tiles…";
+      statusEl.textContent = "baking PMTiles…";
       return;
     }
 
@@ -586,8 +604,8 @@ export function mountApp(root: HTMLElement): void {
     btnBake.disabled = false;
     bakeStatusEl.className = "bake-status";
     if (tm?.version && tm.version > 0) {
-      const mb = tm.bytes ? (tm.bytes / (1024 * 1024)).toFixed(1) : "?";
-      bakeStatusEl.textContent = `PMTiles v${tm.version} · ${(tm.place_count ?? 0).toLocaleString()} pins · ${mb} MB`;
+      const mb = tm.bytes ? `${(tm.bytes / 1024 / 1024).toFixed(1)} MB` : "";
+      bakeStatusEl.textContent = `PMTiles v${tm.version} · ${(tm.place_count ?? 0).toLocaleString()} pins${mb ? ` · ${mb}` : ""}`;
     } else {
       bakeStatusEl.textContent = "";
     }

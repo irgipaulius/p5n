@@ -30,6 +30,15 @@ export class PinSessionCache {
     return added;
   }
 
+  mergePins(pins: PinFeature[]): number {
+    let added = 0;
+    for (const pin of pins) {
+      if (!this.pins.has(pin.id)) added += 1;
+      this.pins.set(pin.id, pin);
+    }
+    return added;
+  }
+
   addPin(pin: PinFeature): void {
     this.pins.set(pin.id, pin);
   }
