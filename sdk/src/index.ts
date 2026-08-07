@@ -95,7 +95,6 @@ export class P5nMap {
   private deltaFeatureCount = -1;
   private manifestReady = false;
   private deltaClustered: boolean | null = null;
-  private deltaFlushPending = false;
 
   private pmtilesActive(): boolean {
     return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
@@ -110,7 +109,7 @@ export class P5nMap {
       }
       addPinLayers(this.map, this.pinsSourceId, { heatmapOnly: true });
     }
-    await this.ensureViewportPinLayers();
+    this.setupDeltaOverlay();
     if (!this.pmtilesActive()) {
       this.ensureGridLayer();
     }
@@ -121,32 +120,12 @@ export class P5nMap {
     };
   }
 
-  /** Wait until pin sources/layers are on the map. */
-  whenReady(): Promise<void> {
-    return this.layersReady;
-  }
-
-  private async waitForStyle(): Promise<void> {
-    if (this.map.isStyleLoaded()) return;
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("style load timeout")), 10_000);
-      const done = () => {
-        if (!this.map.isStyleLoaded()) return;
-        clearTimeout(timer);
-        this.map.off("styledata", done);
-        this.map.off("load", done);
-        resolve();
-      };
-      this.map.on("styledata", done);
-      this.map.on("load", done);
-      done();
-    }).catch(() => undefined);
-  }
-
-  /** Viewport pins: non-clustered overlay on PMTiles; clustered fallback without PMTiles. */
-  private async ensureViewportPinLayers(): Promise<void> {
-    await this.waitForStyle();
-    await registerPinIcons(this.map);
+  /** Sync — must not bail; bbox pins have nowhere to render without this. */
+  private setupDeltaOverlay(): void {
+    if (!this.map.isStyleLoaded()) {
+      this.map.once("load", () => this.setupDeltaOverlay());
+      return;
+    }
 
     const wantCluster = !this.pmtilesActive();
     if (this.map.getSource(this.deltaSourceId) && this.deltaClustered !== wantCluster) {
@@ -162,11 +141,15 @@ export class P5nMap {
       addGeoJsonPinLayers(this.map, this.deltaSourceId, false);
     }
     this.deltaClustered = wantCluster;
-
     this.ensureFilteredLayer();
+    this.raiseBboxLayers();
     this.flushDeltaPins();
     this.flushFilteredPins();
-    this.raiseBboxLayers();
+  }
+
+  /** Wait until pin sources/layers are on the map. */
+  whenReady(): Promise<void> {
+    return this.layersReady;
   }
 
   /** Keep viewport pin markers above PMTiles heatmap. */
@@ -238,18 +221,11 @@ export class P5nMap {
   }
 
   private flushDeltaPins(): void {
-    const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
-    if (!src) {
-      if (this.deltaFlushPending) return;
-      this.deltaFlushPending = true;
-      void this.ensureViewportPinLayers()
-        .catch(() => undefined)
-        .finally(() => {
-          this.deltaFlushPending = false;
-        })
-        .then(() => this.flushDeltaPins());
-      return;
+    if (!this.map.getSource(this.deltaSourceId)) {
+      this.setupDeltaOverlay();
     }
+    const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
+    if (!src) return;
     const n = this.deltaFeatures.length;
     if (n === this.deltaFeatureCount) return;
     this.deltaFeatureCount = n;
@@ -265,7 +241,7 @@ export class P5nMap {
     }
 
     if (!this.map.getLayer(`${this.deltaSourceId}-circles`)) {
-      await this.ensureViewportPinLayers();
+      this.setupDeltaOverlay();
     }
 
     if (!this.pmtilesActive() && shouldUseGrid(this.map)) {
