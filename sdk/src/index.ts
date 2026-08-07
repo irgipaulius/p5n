@@ -4,15 +4,16 @@ import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
 import {
-  addDeltaPinLayers,
   addGeoJsonPinLayers,
   addGridPinLayers,
   addPinLayers,
   baseLayerIds,
+  bboxPinLayerIds,
   deltaLayerIds,
   filteredLayerIds,
   gridPinLayerIds,
   PIN_CLUSTER_SOURCE_OPTS,
+  removeGeoJsonPinLayers,
   setLayerVisibility,
   setSelectedPinFeature,
   setTypeFilter,
@@ -67,8 +68,12 @@ export class P5nMap {
     this.gridLoader = new GridPinLoader(this.map, config.apiBase, this.gridSourceId);
     this.map.on("load", () => {
       this.styleReady = true;
-      void this.attachSources().then(() => this.resolveLayersReady());
+      if (this.manifestReady) void this.finishAttach();
     });
+  }
+
+  private finishAttach(): Promise<void> {
+    return this.attachSources().then(() => this.resolveLayersReady());
   }
 
   private filteredSourceId = "pins-filtered";
@@ -82,6 +87,8 @@ export class P5nMap {
   private gridAvailable = false;
   private useBakedTiles = false;
   private deltaFeatureCount = -1;
+  private manifestReady = false;
+  private deltaClustered: boolean | null = null;
 
   private pmtilesActive(): boolean {
     return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
@@ -96,11 +103,12 @@ export class P5nMap {
       }
       addPinLayers(this.map, this.pinsSourceId, { heatmapOnly: true });
     }
-    await this.ensureDeltaLayer();
+    await this.ensureViewportPinLayers();
     if (!this.pmtilesActive()) {
       this.ensureGridLayer();
     }
     setSelectedPinFeature(this.map, this.selectedPin);
+    this.applyVisibilityState();
     this.layerAttach = () => {
       void this.attachSources();
     };
@@ -111,15 +119,29 @@ export class P5nMap {
     return this.layersReady;
   }
 
-  private async ensureDeltaLayer(): Promise<void> {
+  /** Viewport pins: non-clustered overlay on PMTiles; clustered fallback without PMTiles. */
+  private async ensureViewportPinLayers(): Promise<void> {
     if (!this.map.isStyleLoaded()) return;
     await registerPinIcons(this.map);
-    addDeltaGeoJsonSource(this.map, this.deltaSourceId);
-    addDeltaPinLayers(this.map, this.deltaSourceId);
+
+    const wantCluster = !this.pmtilesActive();
+    if (this.map.getSource(this.deltaSourceId) && this.deltaClustered !== wantCluster) {
+      removeGeoJsonPinLayers(this.map, this.deltaSourceId);
+      this.map.removeSource(this.deltaSourceId);
+      this.deltaFeatureCount = -1;
+    }
+
+    addDeltaGeoJsonSource(this.map, this.deltaSourceId, wantCluster);
+    if (wantCluster) {
+      addGeoJsonPinLayers(this.map, this.deltaSourceId, true);
+    } else {
+      addGeoJsonPinLayers(this.map, this.deltaSourceId, false);
+    }
+    this.deltaClustered = wantCluster;
+
     this.ensureFilteredLayer();
     this.flushDeltaPins();
     this.flushFilteredPins();
-    this.applyVisibilityState();
   }
 
   private ensureFilteredLayer(): void {
@@ -156,11 +178,11 @@ export class P5nMap {
     if (usePmtiles) {
       setLayerVisibility(this.map, [`${this.pinsSourceId}-heatmap`], !this.filterMode && !zoomedIn);
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId).slice(1), false);
+      setLayerVisibility(this.map, bboxPinLayerIds(this.deltaSourceId), !this.filterMode && zoomedIn);
     } else {
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode);
+      setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
     }
-
-    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
     setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && useGrid);
     setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
 
@@ -208,6 +230,7 @@ export class P5nMap {
     const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
     const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
     refresh();
+    this.applyVisibilityState();
     return visible;
   }
 
@@ -279,6 +302,7 @@ export class P5nMap {
   }
 
   async initTilesFromManifest(): Promise<boolean> {
+    let ok = false;
     try {
       const manifest = await fetchTileManifest(this.config.apiBase);
       this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
@@ -287,13 +311,17 @@ export class P5nMap {
           ? manifest.url
           : `pmtiles://${manifest.url}`;
         this.useBakedTiles = true;
-        if (this.styleReady) await this.attachSources();
-        return true;
+        ok = true;
       }
     } catch {
       /* no baked tiles yet */
     }
-    return false;
+    this.manifestReady = true;
+    if (this.styleReady) await this.finishAttach();
+    else if (!ok) {
+      /* no manifest — still need layers once map loads */
+    }
+    return ok;
   }
 
   /** Reload grid/baked state after dashboard bake. */
@@ -343,7 +371,6 @@ export class P5nMap {
     this.config.offlineTilesPath = blobUrl;
     this.config.tilesUrl = null;
     this.useBakedTiles = true;
-    if (this.styleReady) await this.attachSources();
     return true;
   }
 
@@ -411,7 +438,7 @@ export class P5nMap {
     const layers = this.filterMode
       ? filteredLayerIds(this.filteredSourceId)
       : this.pmtilesActive()
-        ? deltaLayerIds(this.deltaSourceId)
+        ? bboxPinLayerIds(this.deltaSourceId)
         : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
     setTypeFilter(this.map, types, layers);
   }
@@ -457,6 +484,33 @@ export class P5nMap {
 
   onPinClick(handler: (pin: { id: string; lat: number; lng: number; t: number }) => void): void {
     registerPinInteractions(this.map, handler);
+  }
+
+  /** Diagnostics — pin count, layer visibility (dev / ?debug=1). */
+  debugPinState(): Record<string, unknown> {
+    const zoomedIn = !shouldUseGrid(this.map);
+    const layerIds = [...bboxPinLayerIds(this.deltaSourceId), `${this.pinsSourceId}-heatmap`];
+    const layers: Record<string, unknown> = {};
+    for (const id of layerIds) {
+      if (!this.map.getLayer(id)) {
+        layers[id] = { exists: false };
+        continue;
+      }
+      layers[id] = {
+        exists: true,
+        visibility: this.map.getLayoutProperty(id, "visibility") ?? "(default)",
+        filter: this.map.getFilter(id) ?? null,
+      };
+    }
+    return {
+      zoom: this.map.getZoom(),
+      pmtilesActive: this.pmtilesActive(),
+      zoomedIn,
+      deltaFeatures: this.deltaFeatures.length,
+      cacheSize: this.pinCache.size,
+      filterMode: this.filterMode,
+      layers,
+    };
   }
 }
 

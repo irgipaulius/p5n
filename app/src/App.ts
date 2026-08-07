@@ -129,6 +129,9 @@ export function mountApp(root: HTMLElement): void {
   let searchGeneration = 0;
 
   const p5n = new P5nMap(mapEl, { apiBase: API_BASE, dark: true });
+  if (new URLSearchParams(location.search).has("debug")) {
+    (window as unknown as { __p5n?: P5nMap }).__p5n = p5n;
+  }
   installPullRefreshGuard(mapEl);
   p5n.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
   p5n.map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: true }), "bottom-right");
