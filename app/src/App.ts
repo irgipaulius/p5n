@@ -188,6 +188,7 @@ export function mountApp(root: HTMLElement): void {
             ? "ready"
             : "ready — pan to explore";
     p5n.filterTypes([...selectedTypes]);
+    void p5n.loadViewportPins();
     await refreshStats();
     if (baking) startBakePoll();
     await loadAttributes();

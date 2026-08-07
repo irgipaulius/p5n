@@ -1,6 +1,9 @@
 import type maplibregl from "maplibre-gl";
 import { ALL_TYPE_INTS, colorForType } from "../colors";
 import { iconImageExpression } from "../icons/pin-icons";
+import { GRID_MAX_ZOOM } from "../pins/zoom-policy";
+
+const GRID_BBOX_MIN_ZOOM = GRID_MAX_ZOOM;
 
 const TYPE_NUM = ["to-number", ["get", "t"]] as maplibregl.ExpressionSpecification;
 
@@ -274,6 +277,7 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clust
       id: circleId,
       type: "circle",
       source: sourceId,
+      minzoom: clustered ? 0 : GRID_BBOX_MIN_ZOOM,
       filter: clustered ? ["!", ["has", "point_count"]] : undefined,
       paint: {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 7, 8, 9, 12, 11, 16, 14],

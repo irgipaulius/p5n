@@ -142,6 +142,20 @@ export class P5nMap {
     this.ensureFilteredLayer();
     this.flushDeltaPins();
     this.flushFilteredPins();
+    this.raiseBboxLayers();
+  }
+
+  /** Keep viewport pin markers above PMTiles heatmap. */
+  private raiseBboxLayers(): void {
+    for (const id of bboxPinLayerIds(this.deltaSourceId)) {
+      if (this.map.getLayer(id)) {
+        try {
+          this.map.moveLayer(id);
+        } catch {
+          /* already on top */
+        }
+      }
+    }
   }
 
   private ensureFilteredLayer(): void {
@@ -178,7 +192,8 @@ export class P5nMap {
     if (usePmtiles) {
       setLayerVisibility(this.map, [`${this.pinsSourceId}-heatmap`], !this.filterMode && !zoomedIn);
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId).slice(1), false);
-      setLayerVisibility(this.map, bboxPinLayerIds(this.deltaSourceId), !this.filterMode && zoomedIn);
+      // Always keep bbox layers enabled — minzoom on circles/symbols handles zoom tiering.
+      setLayerVisibility(this.map, bboxPinLayerIds(this.deltaSourceId), !this.filterMode);
     } else {
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode);
       setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
@@ -214,6 +229,8 @@ export class P5nMap {
       this.applyVisibilityState();
       return 0;
     }
+
+    await this.ensureViewportPinLayers();
 
     if (!this.pmtilesActive() && shouldUseGrid(this.map)) {
       this.applyVisibilityState();
