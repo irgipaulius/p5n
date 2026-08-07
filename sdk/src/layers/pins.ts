@@ -428,7 +428,7 @@ export function setTypeFilter(map: maplibregl.Map, types: number[] | null, layer
   let typeFilter: maplibregl.FilterSpecification | null = null;
   if (types && types.length === 0) {
     typeFilter = ["==", ["literal", 1], 0];
-  } else if (types && types.length > 0) {
+  } else if (types && types.length > 0 && types.length < ALL_TYPE_INTS.length) {
     typeFilter = ["in", TYPE_NUM, ["literal", types]];
   }
   for (const id of layerIds) {

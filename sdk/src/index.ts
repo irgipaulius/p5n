@@ -74,7 +74,12 @@ export class P5nMap {
   }
 
   private finishAttach(): Promise<void> {
-    return this.attachSources().then(() => this.resolveLayersReady());
+    return this.attachSources().then(async () => {
+      this.resolveLayersReady();
+      if (!shouldUseGrid(this.map) && !this.filterMode) {
+        await this.loadViewportPins();
+      }
+    });
   }
 
   private filteredSourceId = "pins-filtered";
@@ -120,9 +125,24 @@ export class P5nMap {
     return this.layersReady;
   }
 
+  private async waitForStyle(): Promise<void> {
+    if (this.map.isStyleLoaded()) return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        if (!this.map.isStyleLoaded()) return;
+        this.map.off("styledata", done);
+        this.map.off("load", done);
+        resolve();
+      };
+      this.map.on("styledata", done);
+      this.map.on("load", done);
+      done();
+    });
+  }
+
   /** Viewport pins: non-clustered overlay on PMTiles; clustered fallback without PMTiles. */
   private async ensureViewportPinLayers(): Promise<void> {
-    if (!this.map.isStyleLoaded()) return;
+    await this.waitForStyle();
     await registerPinIcons(this.map);
 
     const wantCluster = !this.pmtilesActive();
@@ -216,7 +236,10 @@ export class P5nMap {
 
   private flushDeltaPins(): void {
     const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
-    if (!src) return;
+    if (!src) {
+      void this.ensureViewportPinLayers().then(() => this.flushDeltaPins());
+      return;
+    }
     const n = this.deltaFeatures.length;
     if (n === this.deltaFeatureCount) return;
     this.deltaFeatureCount = n;
@@ -231,7 +254,7 @@ export class P5nMap {
       return 0;
     }
 
-    if (!this.map.getSource(this.deltaSourceId)) {
+    if (!this.map.getLayer(`${this.deltaSourceId}-circles`)) {
       await this.ensureViewportPinLayers();
     }
 
