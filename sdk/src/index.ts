@@ -22,6 +22,7 @@ import {
 import { registerPinInteractions } from "./pin-interactions";
 import {
   expandedBbox,
+  MAX_PINS_IN_VIEW,
   pinInBbox,
   scheduleViewportPins,
   syncViewportPins,
@@ -230,7 +231,9 @@ export class P5nMap {
       return 0;
     }
 
-    await this.ensureViewportPinLayers();
+    if (!this.map.getSource(this.deltaSourceId)) {
+      await this.ensureViewportPinLayers();
+    }
 
     if (!this.pmtilesActive() && shouldUseGrid(this.map)) {
       this.applyVisibilityState();
@@ -248,7 +251,18 @@ export class P5nMap {
     const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
     refresh();
     this.applyVisibilityState();
+    this.raiseBboxLayers();
+    this.scheduleEnrichForViewport();
     return visible;
+  }
+
+  private scheduleEnrichForViewport(): void {
+    if (this.filterMode || shouldUseGrid(this.map)) return;
+    const ids = this.deltaFeatures
+      .slice(0, 500)
+      .map((f) => String(f.properties?.id ?? f.id ?? ""))
+      .filter(Boolean);
+    scheduleViewportEnrich(this.map, this.config.apiBase, this.deltaSourceId, ids);
   }
 
   /** @deprecated Use loadViewportPins — loads only pins in the current map view. */
@@ -257,7 +271,7 @@ export class P5nMap {
   }
 
   setDeltaPins(pins: PinFeature[]): void {
-    this.deltaFeatures = pins.map((p) => this.pinFeature(p));
+    this.deltaFeatures = pins.slice(0, MAX_PINS_IN_VIEW).map((p) => this.pinFeature(p));
     this.flushDeltaPins();
   }
 
@@ -403,9 +417,9 @@ export class P5nMap {
     );
   }
 
-  onMoveEndEnrich(since?: string): void {
+  onMoveEndEnrich(): void {
     this.map.on("moveend", () => {
-      scheduleViewportEnrich(this.map, this.config.apiBase, this.pinsSourceId, since);
+      this.scheduleEnrichForViewport();
     });
   }
 

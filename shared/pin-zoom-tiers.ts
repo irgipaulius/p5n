@@ -8,8 +8,8 @@ export const PIN_FETCH_MIN_ZOOM = 0;
 
 /** Max pins requested per bbox fetch (scales with zoom on client). */
 export function bboxPinLimit(zoom: number): number {
-  if (zoom < 8) return 1500;
-  if (zoom < 10) return 2500;
-  if (zoom < 12) return 4000;
-  return 5000;
+  if (zoom < 8) return 800;
+  if (zoom < 10) return 1500;
+  if (zoom < 12) return 2200;
+  return 2500;
 }

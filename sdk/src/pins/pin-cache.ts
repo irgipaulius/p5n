@@ -55,4 +55,11 @@ export class PinSessionCache {
     }
     return out;
   }
+
+  /** Drop cached pins outside the padded viewport — keeps memory/render bounded. */
+  trimOutsideBbox(bbox: { west: number; south: number; east: number; north: number }): void {
+    for (const [id, pin] of this.pins) {
+      if (!pinInBbox(pin, bbox)) this.pins.delete(id);
+    }
+  }
 }

@@ -1,4 +1,5 @@
 import type maplibregl from "maplibre-gl";
+import { decodePin, type CompactPin } from "../../../shared/pin-compact";
 import { bboxPinLimit } from "../../../shared/pin-zoom-tiers";
 import { geohash4CellsForBbox } from "../geohash";
 import type { PinFeature } from "../types";
@@ -21,12 +22,18 @@ export function pinInBbox(
 
 const MAX_TILES_PER_REQUEST = 48;
 const MAX_PARALLEL_REQUESTS = 4;
-const MAX_PINS_IN_VIEW = 8000;
+/** Hard cap on pins painted — never render 60k. */
+export const MAX_PINS_IN_VIEW = 2500;
 
 function maxCellsForZoom(z: number): number {
   if (z < 8) return 32;
   if (z < 10) return 48;
   return 64;
+}
+
+function compactToFeature(c: CompactPin): PinFeature {
+  const p = decodePin(c);
+  return { id: p.id, lat: p.lat, lng: p.lng, t: p.t };
 }
 
 export async function fetchViewportPins(
@@ -44,8 +51,8 @@ export async function fetchViewportPins(
   });
   const resp = await fetch(`${apiBase}/api/pins/bbox?${params}`);
   if (!resp.ok) return [];
-  const data = (await resp.json()) as { pins: PinFeature[] };
-  return data.pins ?? [];
+  const data = (await resp.json()) as { p?: CompactPin[] };
+  return (data.p ?? []).map(compactToFeature);
 }
 
 async function fetchPinTileChunk(
@@ -55,8 +62,12 @@ async function fetchPinTileChunk(
   const params = new URLSearchParams({ g4: chunk.join(",") });
   const resp = await fetch(`${apiBase}/api/pins/tiles?${params}`);
   if (!resp.ok) return {};
-  const data = (await resp.json()) as { tiles?: Record<string, PinFeature[]> };
-  return data.tiles ?? {};
+  const data = (await resp.json()) as { t?: Record<string, CompactPin[]> };
+  const out: Record<string, PinFeature[]> = {};
+  for (const [g4, rows] of Object.entries(data.t ?? {})) {
+    out[g4] = rows.map(compactToFeature);
+  }
+  return out;
 }
 
 async function fetchPinTiles(
@@ -106,6 +117,7 @@ export async function syncViewportPins(
   }
 
   const z = map.getZoom();
+  cache.trimOutsideBbox(viewportBbox(map));
 
   if (z < 10) {
     const pins = await fetchViewportPins(apiBase, map);

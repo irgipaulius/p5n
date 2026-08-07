@@ -1,4 +1,4 @@
-import { listAttributeDefs, listGridCells, listGridCellsInBbox, listPlacesGroupedByGeohash4, listPlacesInBbox, searchPlacesPage } from "./db";
+import { listAttributeDefs, listCompactPinsGroupedByGeohash4, listCompactPinsInBbox, listGridCells, listGridCellsInBbox, searchPlacesPage } from "./db";
 import type { Env, SearchPin } from "./types";
 
 const PAGE_SIZE = 50;
@@ -41,8 +41,8 @@ export async function handleBboxPins(env: Env, url: URL): Promise<Response> {
   const bbox = parseBbox(url);
   if (!bbox) return json({ error: "bbox required: west,south,east,north" }, 400);
   const limit = Math.min(10_000, Number(url.searchParams.get("limit") || 5000));
-  const pins = await listPlacesInBbox(env, bbox.west, bbox.south, bbox.east, bbox.north, limit);
-  return json({ pins, count: pins.length }, 200, {
+  const p = await listCompactPinsInBbox(env, bbox.west, bbox.south, bbox.east, bbox.north, limit);
+  return json({ p, n: p.length }, 200, {
     "cache-control": "public, max-age=30",
   });
 }
@@ -53,18 +53,29 @@ export async function handleTilePins(env: Env, url: URL): Promise<Response> {
   if (tiles.length === 0) return json({ error: "g4 required: comma-separated geohash4 tiles" }, 400);
   if (tiles.length > 120) return json({ error: "max 120 tiles per request" }, 400);
 
-  const grouped = await listPlacesGroupedByGeohash4(env, tiles);
-  let count = 0;
-  for (const list of Object.values(grouped)) count += list.length;
+  const t = await listCompactPinsGroupedByGeohash4(env, tiles);
+  let n = 0;
+  for (const list of Object.values(t)) n += list.length;
 
-  return json({ tiles: grouped, count }, 200, {
+  return json({ t, n }, 200, {
     "cache-control": "public, max-age=300",
   });
 }
 
 export async function handleEnrich(env: Env, url: URL): Promise<Response> {
+  const ids = (url.searchParams.get("ids") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 500);
+  if (ids.length > 0) {
+    const { enrichPlacesByIds } = await import("./db");
+    const e = await enrichPlacesByIds(env, ids);
+    return json({ e, n: e.length }, 200, { "cache-control": "no-store" });
+  }
+
   const bbox = parseBbox(url);
-  if (!bbox) return json({ error: "bbox required" }, 400);
+  if (!bbox) return json({ error: "bbox or ids required" }, 400);
   const since = url.searchParams.get("since") ?? undefined;
   const { enrichPlaces } = await import("./db");
   const pins = await enrichPlaces(env, bbox.west, bbox.south, bbox.east, bbox.north, since);
