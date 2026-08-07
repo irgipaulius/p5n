@@ -77,7 +77,7 @@ function clusterFeaturesInTile(
   }
   return [...cells.values()].map((c, i) => ({
     type: 1,
-    geometry: [[[c.x, c.y]]],
+    geometry: [[c.x, c.y]],
     tags: { point_count: c.count, count: c.count },
     id: i,
   }));
@@ -108,7 +108,7 @@ async function writeGridHeatmapTiles(
       const [px, py] = tilePoint(row.lng, row.lat, z, x, y);
       bucket.features.push({
         type: 1,
-        geometry: [[[px, py]]],
+        geometry: [[px, py]],
         tags: { point_count: row.count, count: row.count },
         id: bucket.features.length,
       });
