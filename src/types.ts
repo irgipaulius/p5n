@@ -113,19 +113,6 @@ export interface PinGeo {
   updated_at: string;
 }
 
-export interface EnrichPin {
-  id: string;
-  lat: number;
-  lng: number;
-  t: number;
-  type: string;
-  rating: number | null;
-  reviews: number;
-  attrs0: number;
-  attrs1: number;
-  name: string | null;
-}
-
 export interface SearchPin {
   id: string;
   lat: number;

@@ -143,27 +143,3 @@ export async function syncViewportPins(
   const after = visiblePins(map, cache);
   return { visible: after.length, fetched: missing.length, cached: cache.size };
 }
-
-let loadTimer: ReturnType<typeof setTimeout> | null = null;
-
-export function scheduleViewportPins(
-  map: maplibregl.Map,
-  apiBase: string,
-  cache: PinSessionCache,
-  onPins: (pins: PinFeature[], meta: { fromCache: boolean }) => void,
-  delayMs = 300,
-): void {
-  onPins(visiblePins(map, cache), { fromCache: true });
-
-  if (!shouldFetchPins(map) || shouldUseGrid(map)) return;
-
-  if (loadTimer) clearTimeout(loadTimer);
-  const delay = cache.size === 0 ? 0 : delayMs;
-  loadTimer = setTimeout(() => {
-    void syncViewportPins(apiBase, map, cache, () => {
-      onPins(visiblePins(map, cache), { fromCache: false });
-    }).then(() => {
-      onPins(visiblePins(map, cache), { fromCache: false });
-    });
-  }, delay);
-}

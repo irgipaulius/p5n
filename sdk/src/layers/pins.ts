@@ -486,24 +486,6 @@ export function setTypeFilter(map: maplibregl.Map, types: number[] | null, layer
   }
 }
 
-export function applyEnrichmentFeatureState(
-  map: maplibregl.Map,
-  sourceId: string,
-  pins: Array<{ id: string; rating?: number | null; reviews?: number; attrs0?: number; attrs1?: number }>,
-): void {
-  for (const p of pins) {
-    map.setFeatureState(
-      { source: sourceId, sourceLayer: "pins", id: p.id },
-      {
-        rating: p.rating ?? 0,
-        reviews: p.reviews ?? 0,
-        attrs0: p.attrs0 ?? 0,
-        attrs1: p.attrs1 ?? 0,
-      },
-    );
-  }
-}
-
 /** Feature-state for GeoJSON viewport pins (promoteId: id). */
 export function applyGeoJsonEnrichmentFeatureState(
   map: maplibregl.Map,

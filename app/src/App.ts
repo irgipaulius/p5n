@@ -129,9 +129,6 @@ export function mountApp(root: HTMLElement): void {
   let searchGeneration = 0;
 
   const p5n = new P5nMap(mapEl, { apiBase: API_BASE, dark: true });
-  if (new URLSearchParams(location.search).has("debug")) {
-    (window as unknown as { __p5n?: P5nMap }).__p5n = p5n;
-  }
   installPullRefreshGuard(mapEl);
   p5n.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
   p5n.map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: true }), "bottom-right");
@@ -171,24 +168,22 @@ export function mountApp(root: HTMLElement): void {
           : undefined,
     );
     p5n.onMoveEndLoadPins();
-    p5n.onMoveEndEnrich();
     p5n.map.on("moveend", () => {
       scheduleViewportSearch(450);
     });
+    p5n.filterTypes([...selectedTypes]);
     const n = await p5n.loadViewportPins();
     statusEl.textContent = p5n.hasBakedTiles()
       ? "PMTiles loaded"
       : p5n.hasGridFallback()
         ? "grid fallback"
         : n
-        ? `${n} pins nearby`
-        : view.source === "place"
-          ? "shared place"
-          : view.source === "gps"
-            ? "ready"
-            : "ready — pan to explore";
-    p5n.filterTypes([...selectedTypes]);
-    void p5n.loadViewportPins();
+          ? `${n} pins nearby`
+          : view.source === "place"
+            ? "shared place"
+            : view.source === "gps"
+              ? "ready"
+              : "ready — pan to explore";
     await refreshStats();
     if (baking) startBakePoll();
     await loadAttributes();

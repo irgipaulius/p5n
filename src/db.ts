@@ -7,7 +7,6 @@ import type {
   AttributeDef,
   CommentApi,
   CrawlerState,
-  EnrichPin,
   Env,
   JobKind,
   JobRow,
@@ -746,7 +745,7 @@ function rowToPin(row: PlaceRow): PinGeo {
   };
 }
 
-function rowToCompactPin(row: PlaceRow): CompactPin {
+function rowToCompactPin(row: Pick<PlaceRow, "place_id" | "lat" | "lng" | "type">): CompactPin {
   return compactPin(row.place_id, row.lat, row.lng, typeToInt(row.type));
 }
 
@@ -778,25 +777,6 @@ export async function listPlacesGeoSince(env: Env, cursor: GeoCursor): Promise<P
   return (res.results ?? []).map(rowToPin);
 }
 
-export async function listPlacesInBbox(
-  env: Env,
-  west: number,
-  south: number,
-  east: number,
-  north: number,
-  limit = 5000,
-): Promise<PinGeo[]> {
-  const res = await readDb(env)
-    .prepare(
-      `SELECT place_id, lat, lng, type, name, updated_at FROM places
-       WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?
-       ORDER BY rating DESC NULLS LAST
-       LIMIT ?`,
-    )
-    .bind(south, north, west, east, limit)
-    .all<PlaceRow>();
-  return (res.results ?? []).map(rowToPin);
-}
 
 export async function listCompactPinsInBbox(
   env: Env,
@@ -816,32 +796,6 @@ export async function listCompactPinsInBbox(
     .bind(south, north, west, east, limit)
     .all<Pick<PlaceRow, "place_id" | "lat" | "lng" | "type">>();
   return (res.results ?? []).map(rowToCompactPin);
-}
-
-/** Pins grouped by geohash4 tile (for incremental client cache). */
-export async function listPlacesGroupedByGeohash4(
-  env: Env,
-  tiles: string[],
-): Promise<Record<string, PinGeo[]>> {
-  const grouped: Record<string, PinGeo[]> = {};
-  for (const t of tiles) grouped[t] = [];
-  if (tiles.length === 0) return grouped;
-
-  const placeholders = tiles.map(() => "?").join(",");
-  const res = await readDb(env)
-    .prepare(
-      `SELECT place_id, lat, lng, type, name, updated_at, geohash4 FROM places
-       WHERE geohash4 IN (${placeholders})`,
-    )
-    .bind(...tiles)
-    .all<PlaceRow & { geohash4: string }>();
-
-  for (const row of res.results ?? []) {
-    const g4 = row.geohash4;
-    if (!grouped[g4]) grouped[g4] = [];
-    grouped[g4].push(rowToPin(row));
-  }
-  return grouped;
 }
 
 export async function listCompactPinsGroupedByGeohash4(
@@ -864,7 +818,7 @@ export async function listCompactPinsGroupedByGeohash4(
   for (const row of res.results ?? []) {
     const g4 = row.geohash4;
     if (!grouped[g4]) grouped[g4] = [];
-    grouped[g4].push(rowToCompactPin(row as PlaceRow));
+    grouped[g4].push(rowToCompactPin(row));
   }
   return grouped;
 }
@@ -922,38 +876,6 @@ export async function rebuildPinGrid(db: D1Database): Promise<number> {
     .run();
   const row = await db.prepare("SELECT COUNT(*) AS n FROM pin_grid").first<{ n: number }>();
   return row?.n ?? 0;
-}
-
-export async function enrichPlaces(
-  env: Env,
-  west: number,
-  south: number,
-  east: number,
-  north: number,
-  since?: string,
-): Promise<EnrichPin[]> {
-  let sql = `SELECT place_id, lat, lng, type, rating, review_count, attrs0, attrs1, name
-             FROM places
-             WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?`;
-  const binds: (string | number)[] = [south, north, west, east];
-  if (since) {
-    sql += " AND updated_at > ?";
-    binds.push(since);
-  }
-  sql += " ORDER BY updated_at DESC LIMIT 2000";
-  const res = await readDb(env).prepare(sql).bind(...binds).all<PlaceRow>();
-  return (res.results ?? []).map((r) => ({
-    id: r.place_id,
-    lat: r.lat,
-    lng: r.lng,
-    t: typeToInt(r.type),
-    type: r.type,
-    rating: r.rating,
-    reviews: r.review_count,
-    attrs0: r.attrs0,
-    attrs1: r.attrs1,
-    name: r.name,
-  }));
 }
 
 /** Slim enrichment for visible pins — no lat/lng/name/type payload. */

@@ -1,4 +1,4 @@
-import { listAttributeDefs, listCompactPinsGroupedByGeohash4, listCompactPinsInBbox, listGridCells, listGridCellsInBbox, searchPlacesPage } from "./db";
+import { listAttributeDefs, listCompactPinsGroupedByGeohash4, listCompactPinsInBbox, listGridCells, listGridCellsInBbox, searchPlacesPage, enrichPlacesByIds } from "./db";
 import type { Env, SearchPin } from "./types";
 
 const PAGE_SIZE = 50;
@@ -68,20 +68,9 @@ export async function handleEnrich(env: Env, url: URL): Promise<Response> {
     .map((s) => s.trim())
     .filter(Boolean)
     .slice(0, 500);
-  if (ids.length > 0) {
-    const { enrichPlacesByIds } = await import("./db");
-    const e = await enrichPlacesByIds(env, ids);
-    return json({ e, n: e.length }, 200, { "cache-control": "no-store" });
-  }
-
-  const bbox = parseBbox(url);
-  if (!bbox) return json({ error: "bbox or ids required" }, 400);
-  const since = url.searchParams.get("since") ?? undefined;
-  const { enrichPlaces } = await import("./db");
-  const pins = await enrichPlaces(env, bbox.west, bbox.south, bbox.east, bbox.north, since);
-  return json({ pins, count: pins.length }, 200, {
-    "cache-control": "no-store",
-  });
+  if (ids.length === 0) return json({ error: "ids required (comma-separated, max 500)" }, 400);
+  const e = await enrichPlacesByIds(env, ids);
+  return json({ e, n: e.length }, 200, { "cache-control": "no-store" });
 }
 
 export async function handleGridPins(env: Env, url: URL): Promise<Response> {

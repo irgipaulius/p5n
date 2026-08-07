@@ -25,7 +25,6 @@ import {
   expandedBbox,
   MAX_PINS_IN_VIEW,
   pinInBbox,
-  scheduleViewportPins,
   syncViewportPins,
   shouldFetchPins,
   shouldUseGrid,
@@ -110,7 +109,7 @@ export class P5nMap {
       }
       addPinLayers(this.map, this.pinsSourceId, { heatmapOnly: true });
     }
-    this.setupDeltaOverlay();
+    this.ensureDeltaOverlay();
     if (!this.pmtilesActive()) {
       this.ensureGridLayer();
     }
@@ -121,10 +120,10 @@ export class P5nMap {
     };
   }
 
-  /** Sync — must not bail; bbox pins have nowhere to render without this. */
-  private setupDeltaOverlay(): void {
+  /** PMTiles heatmap when zoomed out; compact bbox pins when zoomed in. */
+  private ensureDeltaOverlay(): void {
     if (!this.map.isStyleLoaded()) {
-      this.map.once("load", () => this.setupDeltaOverlay());
+      this.map.once("load", () => this.ensureDeltaOverlay());
       return;
     }
 
@@ -211,17 +210,12 @@ export class P5nMap {
       this.filterTypes(this.activeTypeFilter);
     } else if (this.activeTypeFilter && this.filterMode) {
       setTypeFilter(this.map, this.activeTypeFilter, filteredLayerIds(this.filteredSourceId));
-    } else if (this.activeTypeFilter) {
-      setTypeFilter(this.map, this.activeTypeFilter, [
-        ...deltaLayerIds(this.deltaSourceId),
-        ...filteredLayerIds(this.filteredSourceId),
-      ]);
     }
   }
 
   private flushDeltaPins(): void {
     if (!this.map.getSource(this.deltaSourceId)) {
-      this.setupDeltaOverlay();
+      this.ensureDeltaOverlay();
     }
     const src = this.map.getSource(this.deltaSourceId) as maplibregl.GeoJSONSource | undefined;
     if (!src) return;
@@ -240,7 +234,7 @@ export class P5nMap {
     }
 
     if (!this.map.getLayer(`${this.deltaSourceId}-circles`)) {
-      this.setupDeltaOverlay();
+      this.ensureDeltaOverlay();
     }
 
     if (!this.pmtilesActive() && shouldUseGrid(this.map)) {
@@ -271,11 +265,6 @@ export class P5nMap {
       .map((f) => String(f.properties?.id ?? f.id ?? ""))
       .filter(Boolean);
     scheduleViewportEnrich(this.map, this.config.apiBase, this.deltaSourceId, ids);
-  }
-
-  /** @deprecated Use loadViewportPins — loads only pins in the current map view. */
-  async loadExistingPins(): Promise<number> {
-    return this.loadViewportPins();
   }
 
   setDeltaPins(pins: PinFeature[]): void {
@@ -357,9 +346,6 @@ export class P5nMap {
     }
     this.manifestReady = true;
     if (this.styleReady) await this.finishAttach();
-    else if (!ok) {
-      /* no manifest — still need layers once map loads */
-    }
     return ok;
   }
 
@@ -423,12 +409,6 @@ export class P5nMap {
       () => void this.attachSources(),
       { skipInitial: true },
     );
-  }
-
-  onMoveEndEnrich(): void {
-    this.map.on("moveend", () => {
-      this.scheduleEnrichForViewport();
-    });
   }
 
   addLivePin(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): void {
@@ -523,33 +503,6 @@ export class P5nMap {
 
   onPinClick(handler: (pin: { id: string; lat: number; lng: number; t: number }) => void): void {
     registerPinInteractions(this.map, handler);
-  }
-
-  /** Diagnostics — pin count, layer visibility (dev / ?debug=1). */
-  debugPinState(): Record<string, unknown> {
-    const zoomedIn = !shouldUseGrid(this.map);
-    const layerIds = [...bboxPinLayerIds(this.deltaSourceId), `${this.pinsSourceId}-heatmap`];
-    const layers: Record<string, unknown> = {};
-    for (const id of layerIds) {
-      if (!this.map.getLayer(id)) {
-        layers[id] = { exists: false };
-        continue;
-      }
-      layers[id] = {
-        exists: true,
-        visibility: this.map.getLayoutProperty(id, "visibility") ?? "(default)",
-        filter: this.map.getFilter(id) ?? null,
-      };
-    }
-    return {
-      zoom: this.map.getZoom(),
-      pmtilesActive: this.pmtilesActive(),
-      zoomedIn,
-      deltaFeatures: this.deltaFeatures.length,
-      cacheSize: this.pinCache.size,
-      filterMode: this.filterMode,
-      layers,
-    };
   }
 }
 
