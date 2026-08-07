@@ -3,6 +3,7 @@ import { Protocol } from "pmtiles";
 import { PIN_CLUSTER_SOURCE_OPTS } from "./layers/pins";
 import type { P5nConfig } from "./types";
 import { MaplibrePreload } from "./maplibre-preload.js";
+import { GRID_MAX_ZOOM } from "./pins/zoom-policy";
 
 let protocolRegistered = false;
 
@@ -78,10 +79,12 @@ export function addPinsVectorSource(
   pmtilesUrl: string,
 ): void {
   if (map.getSource(sourceId)) return;
+  // Explicit tile template — MapLibre 5 sometimes skips tile fetches when only `url` is set.
   map.addSource(sourceId, {
     type: "vector",
-    url: pmtilesUrl,
-    promoteId: "id",
+    tiles: [`${pmtilesUrl}/{z}/{x}/{y}`],
+    minzoom: 0,
+    maxzoom: GRID_MAX_ZOOM,
   });
 }
 

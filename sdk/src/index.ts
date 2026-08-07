@@ -40,7 +40,7 @@ import {
   pinsPmtilesUrl,
   registerPmtilesProtocol,
 } from "./map-core";
-import { downloadPinsPmtiles, getOfflineTilesUrl, hasOfflineTiles, saveOfflineManifest } from "./offline/opfs";
+import { downloadPinsPmtiles, getOfflineTilesUrl, hasOfflineTiles, loadOfflineManifest, saveOfflineManifest, clearOfflineTiles } from "./offline/opfs";
 import { streamSearch } from "./search/streaming-search";
 import { setMapTheme, watchTheme } from "./theme/theme";
 
@@ -334,6 +334,7 @@ export class P5nMap {
       const manifest = await fetchTileManifest(this.config.apiBase);
       this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
       if (manifest.url) {
+        this.config.offlineTilesPath = null;
         this.config.tilesUrl = manifest.url.startsWith("pmtiles://")
           ? manifest.url
           : `pmtiles://${manifest.url}`;
@@ -390,6 +391,16 @@ export class P5nMap {
 
   async tryOfflineFirst(): Promise<boolean> {
     if (!(await hasOfflineTiles())) return false;
+    try {
+      const online = await fetchTileManifest(this.config.apiBase);
+      const offline = await loadOfflineManifest();
+      if (online.url && offline?.version && online.version > offline.version) {
+        await clearOfflineTiles();
+        return false;
+      }
+    } catch {
+      /* offline-only mode when manifest unreachable */
+    }
     const blobUrl = await getOfflineTilesUrl();
     if (!blobUrl) return false;
     this.config.offlineTilesPath = blobUrl;
