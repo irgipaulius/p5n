@@ -3,7 +3,7 @@ import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
-import { addDeltaPinLayers, addGeoJsonPinLayers, addGridPinLayers, addPinLayers, baseLayerIds, deltaLayerIds, filteredLayerIds, gridPinLayerIds, PIN_CLUSTER_SOURCE_OPTS, removeGeoJsonPinLayers, removeGridPinLayers, setLayerVisibility, setSelectedPinFeature, setTypeFilter, vectorPinLayerIds } from "./layers/pins";
+import { addDeltaPinLayers, addGeoJsonPinLayers, addGridPinLayers, addPinLayers, baseLayerIds, bboxPinLayerIds, deltaLayerIds, filteredLayerIds, gridPinLayerIds, PIN_CLUSTER_SOURCE_OPTS, removeGeoJsonPinLayers, removeGridPinLayers, setLayerVisibility, setSelectedPinFeature, setTypeFilter, vectorPinLayerIds } from "./layers/pins";
 import { registerPinInteractions } from "./pin-interactions";
 import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins, shouldUseGrid } from "./pins/viewport-pins";
 import { PinSessionCache } from "./pins/pin-cache";
@@ -46,7 +46,7 @@ export class P5nMap {
     this.gridLoader = new GridPinLoader(this.map, config.apiBase, this.gridSourceId);
     this.map.on("load", () => {
       this.styleReady = true;
-      void this.attachSources().then(() => this.resolveLayersReady());
+      if (!this.attachDeferred) void this.finishAttach();
     });
   }
 
@@ -61,6 +61,14 @@ export class P5nMap {
   private gridAvailable = false;
   private useBakedTiles = false;
   private deltaFeatureCount = -1;
+  private attachDeferred = true;
+  private attachStarted = false;
+
+  private finishAttach(): Promise<void> {
+    if (this.attachStarted) return this.layersReady;
+    this.attachStarted = true;
+    return this.attachSources().then(() => this.resolveLayersReady());
+  }
 
   private pmtilesActive(): boolean {
     return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
@@ -83,9 +91,17 @@ export class P5nMap {
     removeGridPinLayers(this.map, this.gridSourceId);
   }
 
+  private removeDeltaSource(): void {
+    removeGeoJsonPinLayers(this.map, this.deltaSourceId);
+    if (this.map.getSource(this.deltaSourceId)) this.map.removeSource(this.deltaSourceId);
+    this.deltaFeatures = [];
+    this.deltaFeatureCount = -1;
+  }
+
   private async ensureBboxPinLayer(): Promise<void> {
     if (!this.map.isStyleLoaded()) return;
     await registerPinIcons(this.map);
+    if (this.map.getSource(this.deltaSourceId)) return;
     addDeltaGeoJsonSource(this.map, this.deltaSourceId, false);
     addGeoJsonPinLayers(this.map, this.deltaSourceId, false);
   }
@@ -95,11 +111,12 @@ export class P5nMap {
     const url = pinsPmtilesUrl(this.config);
     if (this.pmtilesActive() && url) {
       this.tearDownGridLayers();
+      this.removeDeltaSource();
       if (!this.map.getSource(this.pinsSourceId)) {
         addPinsVectorSource(this.map, this.pinsSourceId, url);
         addPinLayers(this.map, this.pinsSourceId, { heatmapOnly: true });
       }
-      if (this.showBboxPins()) await this.ensureBboxPinLayer();
+      await this.ensureBboxPinLayer();
       this.ensureFilteredLayer();
       this.flushFilteredPins();
     } else {
@@ -163,7 +180,7 @@ export class P5nMap {
 
     if (usePmtiles) {
       setLayerVisibility(this.map, [`${this.pinsSourceId}-heatmap`], this.showHeatmap());
-      setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), this.showBboxPins());
+      setLayerVisibility(this.map, bboxPinLayerIds(this.deltaSourceId), this.showBboxPins());
     } else {
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode && usePmtiles);
       setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
@@ -276,15 +293,15 @@ export class P5nMap {
       if (this.filterMode) return;
       void (async () => {
         if (this.pmtilesActive()) {
-          this.applyVisibilityState();
           if (shouldUseGrid(this.map)) {
             this.setDeltaPins([]);
-            return;
+          } else {
+            await this.ensureBboxPinLayer();
+            scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
+              this.setDeltaPins(pins);
+            });
           }
-          await this.ensureBboxPinLayer();
-          scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
-            this.setDeltaPins(pins);
-          });
+          this.applyVisibilityState();
           return;
         }
         if (shouldUseGrid(this.map)) {
@@ -316,6 +333,7 @@ export class P5nMap {
   }
 
   async initTilesFromManifest(): Promise<boolean> {
+    let ok = false;
     try {
       const manifest = await fetchTileManifest(this.config.apiBase);
       this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
@@ -324,15 +342,17 @@ export class P5nMap {
           ? manifest.url
           : `pmtiles://${manifest.url}`;
         this.useBakedTiles = true;
-        this.tearDownGridLayers();
-        if (this.styleReady) await this.attachSources();
-        else this.applyVisibilityState();
-        return true;
+        ok = true;
       }
     } catch {
       /* no baked tiles yet */
     }
-    return false;
+    this.attachDeferred = false;
+    if (this.styleReady) {
+      if (this.attachStarted) await this.attachSources();
+      else await this.finishAttach();
+    }
+    return ok;
   }
 
   /** Reload grid/baked state after dashboard bake. */
@@ -391,7 +411,8 @@ export class P5nMap {
     this.config.offlineTilesPath = blobUrl;
     this.config.tilesUrl = null;
     this.useBakedTiles = true;
-    if (this.styleReady) await this.attachSources();
+    this.attachDeferred = false;
+    if (this.styleReady) await this.finishAttach();
     return true;
   }
 
@@ -459,7 +480,7 @@ export class P5nMap {
     const layers = this.filterMode
       ? filteredLayerIds(this.filteredSourceId)
       : this.pmtilesActive()
-        ? [`${this.pinsSourceId}-heatmap`, ...deltaLayerIds(this.deltaSourceId)]
+        ? bboxPinLayerIds(this.deltaSourceId)
         : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
     setTypeFilter(this.map, types, layers);
   }

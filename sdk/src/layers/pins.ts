@@ -387,6 +387,11 @@ export function deltaLayerIds(deltaId = "pins-delta"): string[] {
   return geoJsonPinLayerIds(deltaId);
 }
 
+/** Non-clustered viewport pins (circles + icons only). */
+export function bboxPinLayerIds(sourceId = "pins-delta"): string[] {
+  return [`${sourceId}-circles`, `${sourceId}-symbols`];
+}
+
 export function baseLayerIds(sourceId = "pins-baked", deltaId = "pins-delta"): string[] {
   return [...vectorPinLayerIds(sourceId), ...deltaLayerIds(deltaId)];
 }
@@ -428,7 +433,9 @@ export function setTypeFilter(map: maplibregl.Map, types: number[] | null, layer
       continue;
     }
     const isVectorPin = id.endsWith("-circles") || id.endsWith("-symbols");
-    const baseFilter: maplibregl.FilterSpecification | null = isVectorPin ? PIN_ONLY : null;
+    const src = map.getLayer(id)?.source;
+    const isBakedVector = isVectorPin && src === "pins-baked";
+    const baseFilter: maplibregl.FilterSpecification | null = isBakedVector ? PIN_ONLY : null;
     if (baseFilter && typeFilter) {
       map.setFilter(id, ["all", baseFilter, typeFilter]);
     } else if (baseFilter) {
