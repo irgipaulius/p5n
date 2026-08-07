@@ -11,6 +11,7 @@ import type { Env } from "./types";
 const LAYER = "pins";
 const EXTENT = 4096;
 const GRID_HEATMAP_MAX_Z = 8;
+const E7 = 10_000_000;
 
 type GridRow = { g4: string; count: number; lat: number; lng: number };
 
@@ -112,10 +113,72 @@ async function writeGridHeatmapTiles(
   return written;
 }
 
+/** s2-pmtiles leaves header bounds at 0 — MapLibre pmtiles:// rejects that. */
+export function boundsFromGrid(rows: GridRow[]): { minLng: number; minLat: number; maxLng: number; maxLat: number } {
+  let minLat = 90;
+  let maxLat = -90;
+  let minLng = 180;
+  let maxLng = -180;
+  for (const row of rows) {
+    if (row.lat < minLat) minLat = row.lat;
+    if (row.lat > maxLat) maxLat = row.lat;
+    if (row.lng < minLng) minLng = row.lng;
+    if (row.lng > maxLng) maxLng = row.lng;
+  }
+  const pad = 0.25;
+  minLng = Math.max(-180, minLng - pad);
+  maxLng = Math.min(180, maxLng + pad);
+  minLat = Math.max(-85, minLat - pad);
+  maxLat = Math.min(85, maxLat + pad);
+  if (minLng >= maxLng) {
+    minLng = Math.max(-180, minLng - 1);
+    maxLng = Math.min(180, maxLng + 1);
+  }
+  if (minLat >= maxLat) {
+    minLat = Math.max(-85, minLat - 1);
+    maxLat = Math.min(85, maxLat + 1);
+  }
+  return { minLng, minLat, maxLng, maxLat };
+}
+
+function patchPmtilesBounds(
+  bytes: Uint8Array,
+  bounds: { minLng: number; minLat: number; maxLng: number; maxLat: number },
+): Uint8Array {
+  const out = new Uint8Array(bytes);
+  const v = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  if (v.getUint16(0, true) !== 0x4d50) return out;
+  const enc = (n: number) => Math.round(n * E7);
+  v.setInt32(102, enc(bounds.minLng), true);
+  v.setInt32(106, enc(bounds.minLat), true);
+  v.setInt32(110, enc(bounds.maxLng), true);
+  v.setInt32(114, enc(bounds.maxLat), true);
+  v.setUint8(118, Math.min(GRID_HEATMAP_MAX_Z, 6));
+  v.setInt32(119, enc((bounds.minLng + bounds.maxLng) / 2), true);
+  v.setInt32(123, enc((bounds.minLat + bounds.maxLat) / 2), true);
+  return out;
+}
+
+/** Re-patch if s2-pmtiles left bounds at 0,0,0,0 (MapLibre rejects the archive). */
+export function ensurePmtilesBounds(
+  bytes: Uint8Array,
+  bounds: { minLng: number; minLat: number; maxLng: number; maxLat: number },
+): Uint8Array {
+  if (bytes.byteLength < 128) return bytes;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (v.getUint16(0, true) !== 0x4d50) return bytes;
+  const minLon = v.getInt32(102, true);
+  const maxLon = v.getInt32(110, true);
+  const minLat = v.getInt32(106, true);
+  const maxLat = v.getInt32(114, true);
+  if (minLon >= maxLon || minLat >= maxLat) return patchPmtilesBounds(bytes, bounds);
+  return bytes;
+}
+
 export async function buildPmtilesBytes(
   db: D1Database,
   onProgress: (p: BakeProgress) => Promise<void>,
-): Promise<{ bytes: Uint8Array; placeCount: number; tileCount: number }> {
+): Promise<{ bytes: Uint8Array; placeCount: number; tileCount: number; gridRows: GridRow[] }> {
   await onProgress({ phase: "grid", done: 0, total: 1 });
 
   const gridRows =
@@ -164,13 +227,14 @@ export async function buildPmtilesBytes(
   });
 
   const bufWriter = writer.writer as BufferWriter;
-  const bytes = bufWriter.commit();
+  const raw = bufWriter.commit();
+  const bytes = patchPmtilesBounds(raw, boundsFromGrid(gridRows));
 
   if (tileCount === 0) {
     throw new Error("tile generation produced zero tiles");
   }
 
-  return { bytes, placeCount, tileCount };
+  return { bytes, placeCount, tileCount, gridRows };
 }
 
 function bytesToBase64(bytes: Uint8Array): string {

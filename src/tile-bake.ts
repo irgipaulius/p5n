@@ -1,5 +1,5 @@
 import { emit, nowIso, rebuildPinGrid, updateTileManifest, writeDb } from "./db";
-import { buildPmtilesBytes, storePmtiles, type BakeProgress } from "./pmtiles-bake";
+import { buildPmtilesBytes, boundsFromGrid, ensurePmtilesBounds, storePmtiles, type BakeProgress } from "./pmtiles-bake";
 import type { Env } from "./types";
 
 /** Bakes that never finish (Worker CPU kill) leave status stuck mid-phase. */
@@ -129,14 +129,15 @@ export async function runTileBake(env: Env): Promise<void> {
       throw new Error("no places with coordinates to bake");
     }
 
-    const { bytes, placeCount, tileCount } = await buildPmtilesBytes(db, (p) => setBakeProgress(db, p));
+    const { bytes, placeCount, tileCount, gridRows } = await buildPmtilesBytes(db, (p) => setBakeProgress(db, p));
 
     const version = Date.now();
     const r2Key = `pins-v${version}.pmtiles`;
 
     await setBakeProgress(db, { phase: "upload", done: 0, total: 1 });
     await emit(db, `tile bake: uploading ${(bytes.byteLength / 1024 / 1024).toFixed(2)} MB PMTiles (${tileCount} tiles)…`);
-    await storePmtiles(env, db, r2Key, bytes);
+    const finalBytes = ensurePmtilesBounds(bytes, boundsFromGrid(gridRows));
+    await storePmtiles(env, db, r2Key, finalBytes);
     await setBakeProgress(db, { phase: "upload", done: 1, total: 1 });
 
     await updateTileManifest(db, version, placeCount, r2Key, bytes.byteLength, gridCells, tileCount);
