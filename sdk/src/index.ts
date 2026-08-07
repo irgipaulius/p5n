@@ -8,7 +8,7 @@ import { registerPinInteractions } from "./pin-interactions";
 import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins, shouldUseGrid } from "./pins/viewport-pins";
 import { PinSessionCache } from "./pins/pin-cache";
 import { GridPinLoader } from "./pins/grid-loader";
-import { GRID_MAX_ZOOM } from "./pins/zoom-policy";
+import { PMTILES_DETAIL_MIN_ZOOM, PMTILES_DETAIL_TILE_MIN } from "../../shared/pin-zoom-tiers";
 import { registerPinIcons } from "./icons/pin-icons";
 import {
   addDeltaGeoJsonSource,
@@ -62,32 +62,65 @@ export class P5nMap {
   private gridAvailable = false;
   private useBakedTiles = false;
   private deltaFeatureCount = -1;
+  /** True when baked PMTiles includes individual pin tiles (post re-bake). */
+  private pmtilesDetailTiles = false;
 
   private pmtilesActive(): boolean {
     return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
   }
 
-  /** Tear down geohash grid + bbox GeoJSON path when PMTiles are primary. */
-  private tearDownLegacyLayers(): void {
+  private applyManifest(manifest: { grid_cells?: number; tile_count?: number }): void {
+    this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
+    this.pmtilesDetailTiles = (manifest.tile_count ?? 0) >= PMTILES_DETAIL_TILE_MIN;
+  }
+
+  /** Bbox API fallback until PMTiles is re-baked with detail tiles. */
+  private useHighZoomBbox(): boolean {
+    return (
+      this.pmtilesActive() &&
+      !this.pmtilesDetailTiles &&
+      this.map.getZoom() >= PMTILES_DETAIL_MIN_ZOOM
+    );
+  }
+
+  private tearDownGridLayers(): void {
     this.gridLoader.clear();
-    this.gridAvailable = false;
     removeGridPinLayers(this.map, this.gridSourceId);
+  }
+
+  private clearHighZoomOverlay(): void {
     this.deltaFeatures = [];
     this.deltaFeatureCount = -1;
     removeGeoJsonPinLayers(this.map, this.deltaSourceId);
     if (this.map.getSource(this.deltaSourceId)) this.map.removeSource(this.deltaSourceId);
+  }
+
+  /** Tear down geohash grid + bbox GeoJSON path when PMTiles are primary. */
+  private tearDownLegacyLayers(): void {
+    this.tearDownGridLayers();
+    this.gridAvailable = false;
+    this.clearHighZoomOverlay();
     this.pinCache.clear();
+  }
+
+  private async ensureHighZoomOverlay(): Promise<void> {
+    if (!this.map.isStyleLoaded()) return;
+    await registerPinIcons(this.map);
+    addDeltaGeoJsonSource(this.map, this.deltaSourceId, false);
+    addGeoJsonPinLayers(this.map, this.deltaSourceId, false);
   }
 
   private async attachSources(): Promise<void> {
     await registerPinIcons(this.map);
     const url = pinsPmtilesUrl(this.config);
     if (this.pmtilesActive() && url) {
-      this.tearDownLegacyLayers();
+      this.tearDownGridLayers();
       if (!this.map.getSource(this.pinsSourceId)) {
         addPinsVectorSource(this.map, this.pinsSourceId, url);
         addPinLayers(this.map, this.pinsSourceId);
       }
+      if (this.useHighZoomBbox()) await this.ensureHighZoomOverlay();
+      else this.clearHighZoomOverlay();
       this.ensureFilteredLayer();
       this.flushFilteredPins();
     } else {
@@ -145,14 +178,27 @@ export class P5nMap {
 
   private applyVisibilityState(): void {
     const usePmtiles = this.pmtilesActive();
+    const z = this.map.getZoom();
+    const highZoomBbox = this.useHighZoomBbox();
     const useGrid =
       !usePmtiles && shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady());
     const showDelta =
       !usePmtiles &&
       !this.filterMode &&
       (this.deltaFeatures.length > 0 || !useGrid);
-    setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode && usePmtiles);
-    if (!usePmtiles) {
+    if (usePmtiles) {
+      const vectorIds = vectorPinLayerIds(this.pinsSourceId);
+      const heatmapId = vectorIds[0];
+      const detailIds = vectorIds.slice(1);
+      setLayerVisibility(this.map, [heatmapId], !this.filterMode && z < PMTILES_DETAIL_MIN_ZOOM);
+      setLayerVisibility(
+        this.map,
+        detailIds,
+        !this.filterMode && this.pmtilesDetailTiles && z >= PMTILES_DETAIL_MIN_ZOOM,
+      );
+      setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), !this.filterMode && highZoomBbox);
+    } else {
+      setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode && usePmtiles);
       setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
       setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && useGrid);
     }
@@ -181,7 +227,19 @@ export class P5nMap {
   }
 
   async loadViewportPins(): Promise<number> {
-    if (this.pmtilesActive()) return 0;
+    if (this.pmtilesActive()) {
+      if (this.useHighZoomBbox()) {
+        await this.ensureHighZoomOverlay();
+        this.applyVisibilityState();
+        const refresh = () => this.setDeltaPins(this.pinCache.pinsInBbox(expandedBbox(this.map)));
+        const { visible } = await syncViewportPins(this.config.apiBase, this.map, this.pinCache, refresh);
+        refresh();
+        return visible;
+      }
+      this.clearHighZoomOverlay();
+      this.applyVisibilityState();
+      return 0;
+    }
 
     if (shouldUseGrid(this.map)) {
       this.applyVisibilityState();
@@ -248,8 +306,21 @@ export class P5nMap {
     });
 
     this.map.on("moveend", () => {
-      if (this.filterMode || this.pmtilesActive()) return;
+      if (this.filterMode) return;
       void (async () => {
+        if (this.pmtilesActive()) {
+          if (this.useHighZoomBbox()) {
+            await this.ensureHighZoomOverlay();
+            this.applyVisibilityState();
+            scheduleViewportPins(this.map, this.config.apiBase, this.pinCache, (pins) => {
+              this.setDeltaPins(pins);
+            });
+          } else {
+            this.clearHighZoomOverlay();
+            this.applyVisibilityState();
+          }
+          return;
+        }
         if (shouldUseGrid(this.map)) {
           await this.gridLoader.sync();
           this.gridAvailable = this.gridAvailable || this.gridLoader.isReady();
@@ -281,7 +352,7 @@ export class P5nMap {
   async initTilesFromManifest(): Promise<boolean> {
     try {
       const manifest = await fetchTileManifest(this.config.apiBase);
-      this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
+      this.applyManifest(manifest);
       if (manifest.url) {
         this.config.tilesUrl = manifest.url.startsWith("pmtiles://")
           ? manifest.url
@@ -304,7 +375,7 @@ export class P5nMap {
       this.gridLoader.clear();
 
       const manifest = await fetchTileManifest(this.config.apiBase);
-      this.gridAvailable = (manifest.grid_cells ?? 0) > 0;
+      this.applyManifest(manifest);
 
       if (manifest.url) {
         const url = manifest.url.startsWith("pmtiles://") ? manifest.url : `pmtiles://${manifest.url}`;
@@ -329,6 +400,8 @@ export class P5nMap {
       if (!this.useBakedTiles) {
         await this.loadViewportPins();
       } else {
+        if (this.pmtilesDetailTiles) this.clearHighZoomOverlay();
+        await this.loadViewportPins();
         this.applyVisibilityState();
       }
       return this.useBakedTiles || this.pinCache.size > 0;
@@ -376,7 +449,7 @@ export class P5nMap {
   }
 
   addLivePin(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): void {
-    if (this.pmtilesActive()) return;
+    if (this.pmtilesActive() && !this.useHighZoomBbox()) return;
     const t = Number(pin.t) || 3;
     const idx = this.deltaFeatures.findIndex((f) => String(f.properties?.id) === pin.id);
     const feature: GeoJSON.Feature = {
@@ -420,8 +493,11 @@ export class P5nMap {
     this.activeTypeFilter = types;
     const layers = this.filterMode
       ? filteredLayerIds(this.filteredSourceId)
-      : this.useBakedTiles
-        ? vectorPinLayerIds(this.pinsSourceId)
+      : this.pmtilesActive()
+        ? [
+            ...vectorPinLayerIds(this.pinsSourceId),
+            ...(this.useHighZoomBbox() ? deltaLayerIds(this.deltaSourceId) : []),
+          ]
         : baseLayerIds(this.pinsSourceId, this.deltaSourceId);
     setTypeFilter(this.map, types, layers);
   }

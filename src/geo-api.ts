@@ -186,6 +186,7 @@ export async function handleTileManifest(env: Env, request: Request): Promise<Re
     built_at: (manifest as { built_at?: string })?.built_at ?? null,
     place_count: (manifest as { place_count?: number })?.place_count ?? 0,
     grid_cells: (manifest as { grid_cells?: number })?.grid_cells ?? 0,
+    tile_count: (manifest as { tile_count?: number })?.tile_count ?? 0,
     bytes: (manifest as { bytes?: number })?.bytes ?? 0,
     url: tilesUrl,
     bake_status: (manifest as { bake_status?: string })?.bake_status ?? "idle",

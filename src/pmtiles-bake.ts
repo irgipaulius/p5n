@@ -13,7 +13,9 @@ const EXPORT_BATCH = 5000;
 const LAYER = "pins";
 const EXTENT = 4096;
 const MAX_ZOOM = 14;
-const GRID_HEATMAP_MAX_Z = 10;
+/** Grid heatmap tiles only — individual pins start at PIN_DETAIL_MIN_Z. */
+const GRID_HEATMAP_MAX_Z = 8;
+const PIN_DETAIL_MIN_Z = 8;
 
 type PinFeature = {
   type: "Feature";
@@ -184,10 +186,12 @@ export async function buildPmtilesBytes(
 
   await onProgress({ phase: "tile", done: 0, total: 3 });
 
+  // indexMaxPoints: 0 + indexMaxZoom === maxZoom populates tileCoords at every zoom;
+  // otherwise only z0 is listed and high-zoom pin tiles are never written.
   const gridIndex = geojsonvt(gridToGeoJson(gridRows), {
     maxZoom: GRID_HEATMAP_MAX_Z,
-    indexMaxZoom: 5,
-    indexMaxPoints: 100000,
+    indexMaxZoom: GRID_HEATMAP_MAX_Z,
+    indexMaxPoints: 0,
     tolerance: 2,
     extent: EXTENT,
     buffer: 64,
@@ -195,8 +199,8 @@ export async function buildPmtilesBytes(
 
   const pinIndex = geojsonvt(collection, {
     maxZoom: MAX_ZOOM,
-    indexMaxZoom: 6,
-    indexMaxPoints: 100000,
+    indexMaxZoom: MAX_ZOOM,
+    indexMaxPoints: 0,
     tolerance: 2,
     extent: EXTENT,
     buffer: 64,
@@ -209,7 +213,7 @@ export async function buildPmtilesBytes(
   tileCount += await writeIndexTiles(writer, gridIndex, 0, GRID_HEATMAP_MAX_Z, false);
   await onProgress({ phase: "tile", done: 1, total: 3 });
 
-  tileCount += await writeIndexTiles(writer, pinIndex, GRID_HEATMAP_MAX_Z + 1, MAX_ZOOM, false);
+  tileCount += await writeIndexTiles(writer, pinIndex, PIN_DETAIL_MIN_Z, MAX_ZOOM, false);
   await onProgress({ phase: "tile", done: 2, total: 3 });
 
   await writer.commit({

@@ -58,7 +58,9 @@ export function removeGeoJsonPinLayers(map: maplibregl.Map, sourceId: string): v
 
 const COUNT = ["to-number", ["get", "count"]] as maplibregl.ExpressionSpecification;
 const POINT_COUNT = ["to-number", ["coalesce", ["get", "point_count"], 1]] as maplibregl.ExpressionSpecification;
-const NOT_CLUSTER: maplibregl.FilterSpecification = ["!", ["has", "point_count"]];
+/** Real POI pins carry type `t`; grid/heatmap aggregates do not. */
+const PIN_ONLY: maplibregl.FilterSpecification = ["has", "t"];
+const NOT_CLUSTER: maplibregl.FilterSpecification = PIN_ONLY;
 
 /** Server-preaggregated grid cells — no client clustering. */
 export function gridPinLayerIds(sourceId = "pins-grid"): string[] {
@@ -407,18 +409,26 @@ export function setLayerVisibility(map: maplibregl.Map, layerIds: string[], visi
 }
 
 export function setTypeFilter(map: maplibregl.Map, types: number[] | null, layerIds: string[]): void {
-  let filter: maplibregl.FilterSpecification | null = null;
+  let typeFilter: maplibregl.FilterSpecification | null = null;
   if (types && types.length === 0) {
-    filter = ["==", ["literal", 1], 0];
+    typeFilter = ["==", ["literal", 1], 0];
   } else if (types && types.length > 0) {
-    filter = ["in", TYPE_NUM, ["literal", types]];
+    typeFilter = ["in", TYPE_NUM, ["literal", types]];
   }
   for (const id of layerIds) {
     if (!map.getLayer(id)) continue;
     if (id.endsWith("-heatmap") || id.endsWith("-cluster-glow") || id.endsWith("-clusters") || id.endsWith("-cluster-count")) {
       continue;
     }
-    map.setFilter(id, filter);
+    const isVectorPin = id.endsWith("-circles") || id.endsWith("-symbols");
+    const baseFilter: maplibregl.FilterSpecification | null = isVectorPin ? PIN_ONLY : null;
+    if (baseFilter && typeFilter) {
+      map.setFilter(id, ["all", baseFilter, typeFilter]);
+    } else if (baseFilter) {
+      map.setFilter(id, baseFilter);
+    } else {
+      map.setFilter(id, typeFilter);
+    }
   }
 }
 

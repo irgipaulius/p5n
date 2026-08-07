@@ -1,0 +1,1 @@
+ALTER TABLE tile_manifest ADD COLUMN tile_count INTEGER NOT NULL DEFAULT 0;

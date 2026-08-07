@@ -31,6 +31,7 @@ export interface TileManifest {
   bake_started_at?: string | null;
   bake_phase?: string | null;
   grid_cells?: number;
+  tile_count?: number;
 }
 
 export interface AttributeDef {

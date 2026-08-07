@@ -1229,12 +1229,13 @@ export async function updateTileManifest(
   r2Key: string,
   bytes: number,
   gridCells = 0,
+  tileCount = 0,
 ): Promise<void> {
   await db
     .prepare(
-      `UPDATE tile_manifest SET version = ?, built_at = ?, place_count = ?, r2_key = ?, bytes = ?, grid_cells = ? WHERE id = 1`,
+      `UPDATE tile_manifest SET version = ?, built_at = ?, place_count = ?, r2_key = ?, bytes = ?, grid_cells = ?, tile_count = ? WHERE id = 1`,
     )
-    .bind(version, nowIso(), placeCount, r2Key, bytes, gridCells)
+    .bind(version, nowIso(), placeCount, r2Key, bytes, gridCells, tileCount)
     .run();
 }
 

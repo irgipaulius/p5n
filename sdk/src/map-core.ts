@@ -43,6 +43,7 @@ export async function fetchTileManifest(apiBase: string): Promise<{
   url: string | null;
   place_count: number;
   grid_cells?: number;
+  tile_count?: number;
 }> {
   const resp = await fetch(`${apiBase}/api/tiles/manifest`);
   if (!resp.ok) throw new Error(`manifest ${resp.status}`);
@@ -84,13 +85,13 @@ export function addPinsVectorSource(
   });
 }
 
-export function addDeltaGeoJsonSource(map: maplibregl.Map, sourceId = "pins-delta"): void {
+export function addDeltaGeoJsonSource(map: maplibregl.Map, sourceId = "pins-delta", clustered = true): void {
   if (map.getSource(sourceId)) return;
   map.addSource(sourceId, {
     type: "geojson",
     data: { type: "FeatureCollection", features: [] },
     promoteId: "id",
-    ...PIN_CLUSTER_SOURCE_OPTS,
+    ...(clustered ? PIN_CLUSTER_SOURCE_OPTS : {}),
   });
 }
 

@@ -157,7 +157,7 @@ export async function runTileBake(env: Env): Promise<void> {
         .run();
     }
 
-    await updateTileManifest(db, version, placeCount, r2Key, bytes.byteLength, gridCells);
+    await updateTileManifest(db, version, placeCount, r2Key, bytes.byteLength, gridCells, tileCount);
     await db
       .prepare(
         `UPDATE tile_manifest SET bake_status = 'idle', bake_progress = 100, bake_phase = NULL, bake_error = NULL WHERE id = 1`,
