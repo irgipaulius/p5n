@@ -15,7 +15,9 @@ const EXTENT = 4096;
 const MAX_ZOOM = 14;
 /** Grid heatmap tiles only — individual pins start at PIN_DETAIL_MIN_Z. */
 const GRID_HEATMAP_MAX_Z = 8;
-const PIN_DETAIL_MIN_Z = 8;
+const PIN_DETAIL_MIN_Z = 10;
+/** Single detail zoom — MapLibre overzooms; keeps Worker bake under ~20k tiles. */
+const PIN_DETAIL_MAX_Z = 10;
 
 type PinFeature = {
   type: "Feature";
