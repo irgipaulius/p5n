@@ -11,8 +11,6 @@ import type { Env } from "./types";
 const LAYER = "pins";
 const EXTENT = 4096;
 const GRID_HEATMAP_MAX_Z = 8;
-/** Below this zoom, cluster points inside each tile (continent view — fewer features). */
-const CLUSTER_BELOW_Z = 6;
 const E7 = 10_000_000;
 
 type GridRow = { g4: string; count: number; lat: number; lng: number };
@@ -56,34 +54,7 @@ function tilePoint(lng: number, lat: number, z: number, x: number, y: number): [
   return [Math.round(px - x * EXTENT), Math.round(py - y * EXTENT)];
 }
 
-function clusterFeaturesInTile(
-  features: GeoJsonVtTile["features"],
-  z: number,
-): GeoJsonVtTile["features"] {
-  const grid = z <= 3 ? 512 : z <= 5 ? 256 : 128;
-  const cells = new Map<string, { x: number; y: number; count: number }>();
-  for (const f of features) {
-    const pt = f.geometry?.[0];
-    if (!pt?.length) continue;
-    const px = pt[0];
-    const py = pt[1];
-    const cx = Math.floor(px / grid) * grid + grid / 2;
-    const cy = Math.floor(py / grid) * grid + grid / 2;
-    const key = `${cx},${cy}`;
-    const w = Number(f.tags?.point_count ?? f.tags?.count ?? 1);
-    const cur = cells.get(key);
-    if (cur) cur.count += w;
-    else cells.set(key, { x: cx, y: cy, count: w });
-  }
-  return [...cells.values()].map((c, i) => ({
-    type: 1,
-    geometry: [[c.x, c.y]],
-    tags: { point_count: c.count, count: c.count },
-    id: i,
-  }));
-}
-
-/** Per-cell MVT points for heatmap density (cluster when zoomed out to stay within Worker CPU). */
+/** Per-cell MVT points — one weighted point per geohash4 cell per tile (heatmap blurs density). */
 async function writeGridHeatmapTiles(
   writer: S2PMTilesWriter,
   rows: GridRow[],
@@ -115,8 +86,7 @@ async function writeGridHeatmapTiles(
     }
 
     for (const bucket of buckets.values()) {
-      const features = z < CLUSTER_BELOW_Z ? clusterFeaturesInTile(bucket.features, z) : bucket.features;
-      const data = encodeTile({ features });
+      const data = encodeTile({ features: bucket.features });
       if (!data) continue;
       await writer.writeTileXYZ(z, bucket.x, bucket.y, data);
       written += 1;

@@ -369,14 +369,34 @@ export function addPinLayers(
       type: "heatmap",
       source: sourceId,
       "source-layer": sourceLayer,
-      maxzoom: 12,
-      paint: {
-        "heatmap-weight": POINT_COUNT,
-        "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 0, 0.5, 6, 1.2, 10, 2],
-        "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 18, 6, 28, 10, 42],
-        "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 5, 0.9, 10, 0.35, 12, 0],
-        "heatmap-color": HEATMAP_COLOR,
-      },
+      maxzoom: GRID_MAX_ZOOM + 1,
+      paint: heatmapOnly
+        ? {
+            "heatmap-weight": [
+              "interpolate",
+              ["linear"],
+              POINT_COUNT,
+              1,
+              0.15,
+              20,
+              0.5,
+              100,
+              1,
+              500,
+              1.5,
+            ],
+            "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 0, 1.4, 5, 1.6, 8, 1.8],
+            "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 90, 4, 60, 6, 40, 8, 28],
+            "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 0, 0.88, 7, 0.45, 8, 0],
+            "heatmap-color": HEATMAP_COLOR,
+          }
+        : {
+            "heatmap-weight": POINT_COUNT,
+            "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 0, 0.5, 6, 1.2, 10, 2],
+            "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 0, 18, 6, 28, 10, 42],
+            "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 5, 0.9, 10, 0.35, 12, 0],
+            "heatmap-color": HEATMAP_COLOR,
+          },
     });
   }
 
