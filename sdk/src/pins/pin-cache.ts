@@ -43,6 +43,11 @@ export class PinSessionCache {
     this.pins.set(pin.id, pin);
   }
 
+  clear(): void {
+    this.pins.clear();
+    this.loadedTiles.clear();
+  }
+
   pinsInBbox(bbox: { west: number; south: number; east: number; north: number }): PinFeature[] {
     const out: PinFeature[] = [];
     for (const pin of this.pins.values()) {

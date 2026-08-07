@@ -143,9 +143,9 @@ export function mountApp(root: HTMLElement): void {
   const deepPlaceId = parsePlaceIdFromPath();
 
   void (async () => {
-    await p5n.whenReady();
     await p5n.tryOfflineFirst();
     await p5n.initTilesFromManifest();
+    await p5n.whenReady();
     p5n.watchSystemTheme();
 
     let deepCenter: { lat: number; lng: number; zoom: number } | undefined;

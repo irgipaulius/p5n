@@ -3,7 +3,7 @@ import type { P5nConfig, PinFeature } from "./types";
 import { fetchPlaceDetail } from "./detail/place-detail";
 import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
-import { addDeltaPinLayers, addGeoJsonPinLayers, addGridPinLayers, addPinLayers, baseLayerIds, deltaLayerIds, filteredLayerIds, gridPinLayerIds, PIN_CLUSTER_SOURCE_OPTS, setLayerVisibility, setSelectedPinFeature, setTypeFilter, vectorPinLayerIds } from "./layers/pins";
+import { addDeltaPinLayers, addGeoJsonPinLayers, addGridPinLayers, addPinLayers, baseLayerIds, deltaLayerIds, filteredLayerIds, gridPinLayerIds, PIN_CLUSTER_SOURCE_OPTS, removeGeoJsonPinLayers, removeGridPinLayers, setLayerVisibility, setSelectedPinFeature, setTypeFilter, vectorPinLayerIds } from "./layers/pins";
 import { registerPinInteractions } from "./pin-interactions";
 import { expandedBbox, fetchViewportPins, pinInBbox, scheduleViewportPins, syncViewportPins, shouldFetchPins, shouldUseGrid } from "./pins/viewport-pins";
 import { PinSessionCache } from "./pins/pin-cache";
@@ -63,16 +63,43 @@ export class P5nMap {
   private useBakedTiles = false;
   private deltaFeatureCount = -1;
 
+  private pmtilesActive(): boolean {
+    return this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
+  }
+
+  /** Tear down geohash grid + bbox GeoJSON path when PMTiles are primary. */
+  private tearDownLegacyLayers(): void {
+    this.gridLoader.clear();
+    this.gridAvailable = false;
+    removeGridPinLayers(this.map, this.gridSourceId);
+    this.deltaFeatures = [];
+    this.deltaFeatureCount = -1;
+    removeGeoJsonPinLayers(this.map, this.deltaSourceId);
+    if (this.map.getSource(this.deltaSourceId)) this.map.removeSource(this.deltaSourceId);
+    this.pinCache.clear();
+  }
+
   private async attachSources(): Promise<void> {
     await registerPinIcons(this.map);
     const url = pinsPmtilesUrl(this.config);
-    if (url) {
-      addPinsVectorSource(this.map, this.pinsSourceId, url);
-      addPinLayers(this.map, this.pinsSourceId);
+    if (this.pmtilesActive() && url) {
+      this.tearDownLegacyLayers();
+      if (!this.map.getSource(this.pinsSourceId)) {
+        addPinsVectorSource(this.map, this.pinsSourceId, url);
+        addPinLayers(this.map, this.pinsSourceId);
+      }
+      this.ensureFilteredLayer();
+      this.flushFilteredPins();
+    } else {
+      if (url) {
+        addPinsVectorSource(this.map, this.pinsSourceId, url);
+        addPinLayers(this.map, this.pinsSourceId);
+      }
+      await this.ensureDeltaLayer();
+      this.ensureGridLayer();
     }
-    await this.ensureDeltaLayer();
-    this.ensureGridLayer();
     setSelectedPinFeature(this.map, this.selectedPin);
+    this.applyVisibilityState();
     this.layerAttach = () => {
       void this.attachSources();
     };
@@ -117,14 +144,18 @@ export class P5nMap {
   }
 
   private applyVisibilityState(): void {
-    const usePmtiles = this.useBakedTiles && pinsPmtilesUrl(this.config) != null;
+    const usePmtiles = this.pmtilesActive();
     const useGrid =
       !usePmtiles && shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady());
     const showDelta =
-      !this.filterMode && (this.deltaFeatures.length > 0 || (!usePmtiles && !useGrid));
+      !usePmtiles &&
+      !this.filterMode &&
+      (this.deltaFeatures.length > 0 || !useGrid);
     setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode && usePmtiles);
-    setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
-    setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && useGrid);
+    if (!usePmtiles) {
+      setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
+      setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && useGrid);
+    }
     setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
     if (this.activeTypeFilter && !this.filterMode) {
       this.filterTypes(this.activeTypeFilter);
@@ -150,7 +181,7 @@ export class P5nMap {
   }
 
   async loadViewportPins(): Promise<number> {
-    if (this.useBakedTiles) return 0;
+    if (this.pmtilesActive()) return 0;
 
     if (shouldUseGrid(this.map)) {
       this.applyVisibilityState();
@@ -208,7 +239,7 @@ export class P5nMap {
   onMoveEndLoadPins(): void {
     let moveTimer: ReturnType<typeof setTimeout> | null = null;
     this.map.on("move", () => {
-      if (this.useBakedTiles || this.filterMode || !shouldUseGrid(this.map) || !this.gridAvailable) return;
+      if (this.pmtilesActive() || this.filterMode || !shouldUseGrid(this.map) || !this.gridAvailable) return;
       if (moveTimer) return;
       moveTimer = setTimeout(() => {
         moveTimer = null;
@@ -217,7 +248,7 @@ export class P5nMap {
     });
 
     this.map.on("moveend", () => {
-      if (this.filterMode || this.useBakedTiles) return;
+      if (this.filterMode || this.pmtilesActive()) return;
       void (async () => {
         if (shouldUseGrid(this.map)) {
           await this.gridLoader.sync();
@@ -256,7 +287,9 @@ export class P5nMap {
           ? manifest.url
           : `pmtiles://${manifest.url}`;
         this.useBakedTiles = true;
+        this.tearDownLegacyLayers();
         if (this.styleReady) await this.attachSources();
+        else this.applyVisibilityState();
         return true;
       }
     } catch {
@@ -278,11 +311,15 @@ export class P5nMap {
         if (this.config.tilesUrl !== url || !this.map.getSource(this.pinsSourceId)) {
           this.config.tilesUrl = url;
           this.useBakedTiles = true;
+          this.tearDownLegacyLayers();
           for (const id of vectorPinLayerIds(this.pinsSourceId)) {
             if (this.map.getLayer(id)) this.map.removeLayer(id);
           }
           if (this.map.getSource(this.pinsSourceId)) this.map.removeSource(this.pinsSourceId);
           if (this.styleReady) await this.attachSources();
+        } else {
+          this.tearDownLegacyLayers();
+          this.applyVisibilityState();
         }
       } else {
         this.config.tilesUrl = null;
@@ -339,6 +376,7 @@ export class P5nMap {
   }
 
   addLivePin(pin: { id: string; lat: number; lng: number; t: number; name?: string | null }): void {
+    if (this.pmtilesActive()) return;
     const t = Number(pin.t) || 3;
     const idx = this.deltaFeatures.findIndex((f) => String(f.properties?.id) === pin.id);
     const feature: GeoJSON.Feature = {

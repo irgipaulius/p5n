@@ -65,6 +65,13 @@ export function gridPinLayerIds(sourceId = "pins-grid"): string[] {
   return [`${sourceId}-heatmap`, `${sourceId}-glow`, `${sourceId}-cells`, `${sourceId}-count`];
 }
 
+export function removeGridPinLayers(map: maplibregl.Map, sourceId = "pins-grid"): void {
+  for (const id of gridPinLayerIds(sourceId)) {
+    if (map.getLayer(id)) map.removeLayer(id);
+  }
+  if (map.getSource(sourceId)) map.removeSource(sourceId);
+}
+
 export function addGridPinLayers(map: maplibregl.Map, sourceId = "pins-grid"): void {
   const heatmapId = `${sourceId}-heatmap`;
   const glowId = `${sourceId}-glow`;
