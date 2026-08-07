@@ -36,7 +36,8 @@ type GeoJsonVtIndex = {
 
 type GeoJsonVtTile = {
   features: Array<{
-    geometry: number[][][];
+    geometry: number[][] | number[][][];
+    tags?: Record<string, unknown>;
     properties?: Record<string, unknown>;
     id?: number | string;
     type?: number;
@@ -58,10 +59,10 @@ function clusterTileFeatures(features: GeoJsonVtTile["features"], z: number): Ge
   for (const f of features) {
     const ring = f.geometry?.[0];
     if (!ring?.length) continue;
-    const x = ring[0][0];
-    const y = ring[0][1];
-    const cx = Math.floor(x / grid) * grid + grid / 2;
-    const cy = Math.floor(y / grid) * grid + grid / 2;
+    const ax = Array.isArray(ring[0]) ? ring[0][0] : ring[0];
+    const ay = Array.isArray(ring[0]) ? ring[0][1] : ring[1];
+    const cx = Math.floor(Number(ax) / grid) * grid + grid / 2;
+    const cy = Math.floor(Number(ay) / grid) * grid + grid / 2;
     const key = `${cx},${cy}`;
     const cur = cells.get(key);
     if (cur) cur.count += 1;
@@ -82,6 +83,108 @@ function encodeTile(tile: GeoJsonVtTile | null): Uint8Array | null {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
+function lngLatToTile(lng: number, lat: number, z: number): { x: number; y: number } {
+  const n = 1 << z;
+  const x = Math.min(n - 1, Math.max(0, Math.floor(((lng + 180) / 360) * n)));
+  const latRad = (lat * Math.PI) / 180;
+  const y = Math.min(
+    n - 1,
+    Math.max(0, Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n)),
+  );
+  return { x, y };
+}
+
+function placeToTileFeature(
+  f: PinFeature,
+  z: number,
+  x: number,
+  y: number,
+): GeoJsonVtTile["features"][number] {
+  const [lng, lat] = f.geometry.coordinates;
+  const px = ((lng + 180) / 360) * (1 << z) * EXTENT;
+  const latRad = (lat * Math.PI) / 180;
+  const py = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * (1 << z) * EXTENT;
+  return {
+    type: 1,
+    geometry: [[Math.round(px - x * EXTENT), Math.round(py - y * EXTENT)]],
+    tags: { id: String(f.properties?.id ?? f.id), t: f.properties?.t as number },
+    id: f.id,
+  };
+}
+
+/** Bucket places into MVT tiles without geojson-vt (worker-safe for 60k+ pins). */
+async function writePinTilesDirect(
+  writer: S2PMTilesWriter,
+  features: PinFeature[],
+  minZ: number,
+  maxZ: number,
+): Promise<number> {
+  let written = 0;
+  for (let z = minZ; z <= maxZ; z++) {
+    const buckets = new Map<string, GeoJsonVtTile["features"]>();
+    for (const f of features) {
+      const [lng, lat] = f.geometry.coordinates;
+      const { x, y } = lngLatToTile(lng, lat, z);
+      const key = `${x},${y}`;
+      let list = buckets.get(key);
+      if (!list) {
+        list = [];
+        buckets.set(key, list);
+      }
+      list.push(placeToTileFeature(f, z, x, y));
+    }
+    for (const [key, feats] of buckets) {
+      const [x, y] = key.split(",").map(Number);
+      const data = encodeTile({ features: feats });
+      if (!data) continue;
+      await writer.writeTileXYZ(z, x, y, data);
+      written += 1;
+    }
+  }
+  return written;
+}
+
+function childTiles(z: number, x: number, y: number): Array<{ z: number; x: number; y: number }> {
+  const nz = z + 1;
+  const nx = x * 2;
+  const ny = y * 2;
+  return [
+    { z: nz, x: nx, y: ny },
+    { z: nz, x: nx + 1, y: ny },
+    { z: nz, x: nx, y: ny + 1 },
+    { z: nz, x: nx + 1, y: ny + 1 },
+  ];
+}
+
+/** Walk geojson-vt tree — tileCoords alone often only lists index tiles (e.g. z0). */
+function enumerateTiles(index: GeoJsonVtIndex, minZ: number, maxZ: number): Array<{ z: number; x: number; y: number }> {
+  const out: Array<{ z: number; x: number; y: number }> = [];
+  const queue: Array<{ z: number; x: number; y: number }> = [...index.tileCoords];
+  const queued = new Set<string>();
+  for (const c of index.tileCoords) queued.add(`${c.z}:${c.x}:${c.y}`);
+
+  while (queue.length > 0) {
+    const { z, x, y } = queue.shift()!;
+    if (z > maxZ) continue;
+
+    const tile = index.getTile(z, x, y);
+    if (!tile?.features?.length) continue;
+
+    if (z >= minZ) out.push({ z, x, y });
+
+    if (z < maxZ) {
+      for (const child of childTiles(z, x, y)) {
+        const key = `${child.z}:${child.x}:${child.y}`;
+        if (queued.has(key)) continue;
+        queued.add(key);
+        queue.push(child);
+      }
+    }
+  }
+
+  return out;
+}
+
 async function writeIndexTiles(
   writer: S2PMTilesWriter,
   index: GeoJsonVtIndex,
@@ -90,8 +193,7 @@ async function writeIndexTiles(
   clusterHeatmap: boolean,
 ): Promise<number> {
   let written = 0;
-  for (const { z, x, y } of index.tileCoords) {
-    if (z < minZ || z > maxZ) continue;
+  for (const { z, x, y } of enumerateTiles(index, minZ, maxZ)) {
     let tile = index.getTile(z, x, y);
     if (!tile?.features?.length) continue;
     if (clusterHeatmap) {
@@ -186,25 +288,14 @@ export async function buildPmtilesBytes(
 
   await onProgress({ phase: "tile", done: 0, total: 3 });
 
-  // indexMaxPoints: 0 + indexMaxZoom === maxZoom populates tileCoords at every zoom;
-  // otherwise only z0 is listed and high-zoom pin tiles are never written.
+  // Light index in memory; enumerateTiles BFS-walks to all zooms at write time.
   const gridIndex = geojsonvt(gridToGeoJson(gridRows), {
     maxZoom: GRID_HEATMAP_MAX_Z,
-    indexMaxZoom: GRID_HEATMAP_MAX_Z,
-    indexMaxPoints: 0,
+    indexMaxZoom: 5,
+    indexMaxPoints: 100000,
     tolerance: 2,
     extent: EXTENT,
     buffer: 64,
-  }) as unknown as GeoJsonVtIndex;
-
-  const pinIndex = geojsonvt(collection, {
-    maxZoom: MAX_ZOOM,
-    indexMaxZoom: MAX_ZOOM,
-    indexMaxPoints: 0,
-    tolerance: 2,
-    extent: EXTENT,
-    buffer: 64,
-    promoteId: "id",
   }) as unknown as GeoJsonVtIndex;
 
   const writer = new S2PMTilesWriter(new BufferWriter(), TileType.Pbf);
@@ -213,7 +304,7 @@ export async function buildPmtilesBytes(
   tileCount += await writeIndexTiles(writer, gridIndex, 0, GRID_HEATMAP_MAX_Z, false);
   await onProgress({ phase: "tile", done: 1, total: 3 });
 
-  tileCount += await writeIndexTiles(writer, pinIndex, PIN_DETAIL_MIN_Z, MAX_ZOOM, false);
+  tileCount += await writePinTilesDirect(writer, collection.features, PIN_DETAIL_MIN_Z, MAX_ZOOM);
   await onProgress({ phase: "tile", done: 2, total: 3 });
 
   await writer.commit({

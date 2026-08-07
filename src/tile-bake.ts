@@ -18,13 +18,14 @@ export interface TileBakeStatus {
   bytes: number;
   r2_key: string | null;
   grid_cells: number;
+  tile_count: number;
 }
 
 export async function getTileBakeStatus(env: Env): Promise<TileBakeStatus | null> {
   return writeDb(env)
     .prepare(
       `SELECT bake_status, bake_progress, bake_total, bake_error, bake_started_at, bake_phase,
-              version, place_count, built_at, bytes, r2_key, grid_cells
+              version, place_count, built_at, bytes, r2_key, grid_cells, tile_count
        FROM tile_manifest WHERE id = 1`,
     )
     .first<TileBakeStatus>();
