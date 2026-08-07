@@ -102,16 +102,17 @@ export class P5nMap {
 
   private async attachSources(): Promise<void> {
     await registerPinIcons(this.map);
-    // Offline-only: baked PMTiles. Online heatmap uses pin_grid GeoJSON (reliable).
     const url = pinsPmtilesUrl(this.config);
-    if (url && this.config.offlineTilesPath) {
+    if (url) {
       if (!this.map.getSource(this.pinsSourceId)) {
         addPinsVectorSource(this.map, this.pinsSourceId, url);
       }
       addPinLayers(this.map, this.pinsSourceId, { heatmapOnly: true });
     }
     this.ensureDeltaOverlay();
-    this.ensureGridLayer();
+    if (!this.pmtilesActive()) {
+      this.ensureGridLayer();
+    }
     setSelectedPinFeature(this.map, this.selectedPin);
     this.applyVisibilityState();
     this.layerAttach = () => {
@@ -149,7 +150,7 @@ export class P5nMap {
     return this.layersReady;
   }
 
-  /** Keep viewport pin markers above grid/PMTiles heatmap. */
+  /** Keep viewport pin markers above PMTiles heatmap. */
   private raiseBboxLayers(): void {
     for (const id of bboxPinLayerIds(this.deltaSourceId)) {
       if (this.map.getLayer(id)) {
@@ -185,26 +186,23 @@ export class P5nMap {
   }
 
   private applyVisibilityState(): void {
+    const usePmtiles = this.pmtilesActive();
     const zoomedIn = !shouldUseGrid(this.map);
-    const offlinePmtiles = this.pmtilesActive() && !!this.config.offlineTilesPath;
-    const showGrid =
-      shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady()) && !offlinePmtiles;
+    const useGrid =
+      !usePmtiles && shouldUseGrid(this.map) && (this.gridAvailable || this.gridLoader.isReady());
     const showDelta =
       !this.filterMode &&
-      (offlinePmtiles ? zoomedIn : this.deltaFeatures.length > 0 || !showGrid);
+      (usePmtiles ? zoomedIn : this.deltaFeatures.length > 0 || !useGrid);
 
-    if (offlinePmtiles) {
+    if (usePmtiles) {
       setLayerVisibility(this.map, [`${this.pinsSourceId}-heatmap`], !this.filterMode && !zoomedIn);
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId).slice(1), false);
       setLayerVisibility(this.map, bboxPinLayerIds(this.deltaSourceId), !this.filterMode);
-    } else if (this.pmtilesActive()) {
-      setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), false);
-      setLayerVisibility(this.map, bboxPinLayerIds(this.deltaSourceId), !this.filterMode && zoomedIn);
     } else {
       setLayerVisibility(this.map, vectorPinLayerIds(this.pinsSourceId), !this.filterMode);
       setLayerVisibility(this.map, deltaLayerIds(this.deltaSourceId), showDelta);
     }
-    setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && showGrid);
+    setLayerVisibility(this.map, gridPinLayerIds(this.gridSourceId), !this.filterMode && useGrid);
     setLayerVisibility(this.map, filteredLayerIds(this.filteredSourceId), this.filterMode);
 
     if (this.activeTypeFilter && !this.filterMode) {
@@ -228,16 +226,21 @@ export class P5nMap {
   }
 
   async loadViewportPins(): Promise<number> {
+    if (this.pmtilesActive() && shouldUseGrid(this.map)) {
+      this.setDeltaPins([]);
+      this.applyVisibilityState();
+      return 0;
+    }
+
     if (!this.map.getLayer(`${this.deltaSourceId}-circles`)) {
       this.ensureDeltaOverlay();
     }
 
-    if (shouldUseGrid(this.map)) {
-      this.ensureGridLayer();
+    if (!this.pmtilesActive() && shouldUseGrid(this.map)) {
       this.applyVisibilityState();
       const n = await this.gridLoader.sync();
       this.gridAvailable = this.gridAvailable || this.gridLoader.isReady();
-      if (this.pmtilesActive() || this.gridLoader.isReady()) {
+      if (this.gridLoader.isReady()) {
         this.setDeltaPins([]);
         this.applyVisibilityState();
         return n;
@@ -295,7 +298,7 @@ export class P5nMap {
   onMoveEndLoadPins(): void {
     let moveTimer: ReturnType<typeof setTimeout> | null = null;
     this.map.on("move", () => {
-      if (this.filterMode || !shouldUseGrid(this.map) || !this.gridAvailable) return;
+      if (this.pmtilesActive() || this.filterMode || !shouldUseGrid(this.map) || !this.gridAvailable) return;
       if (moveTimer) return;
       moveTimer = setTimeout(() => {
         moveTimer = null;

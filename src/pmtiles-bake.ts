@@ -11,6 +11,8 @@ import type { Env } from "./types";
 const LAYER = "pins";
 const EXTENT = 4096;
 const GRID_HEATMAP_MAX_Z = 8;
+/** Below this zoom, cluster points inside each tile (continent view — fewer features). */
+const CLUSTER_BELOW_Z = 6;
 const E7 = 10_000_000;
 
 type GridRow = { g4: string; count: number; lat: number; lng: number };
@@ -54,7 +56,34 @@ function tilePoint(lng: number, lat: number, z: number, x: number, y: number): [
   return [Math.round(px - x * EXTENT), Math.round(py - y * EXTENT)];
 }
 
-/** Bucket pre-aggregated grid cells into MVT tiles — O(cells × zoom), worker-safe. */
+function clusterFeaturesInTile(
+  features: GeoJsonVtTile["features"],
+  z: number,
+): GeoJsonVtTile["features"] {
+  const grid = z <= 3 ? 512 : z <= 5 ? 256 : 128;
+  const cells = new Map<string, { x: number; y: number; count: number }>();
+  for (const f of features) {
+    const ring = f.geometry?.[0];
+    if (!ring?.length) continue;
+    const px = ring[0][0];
+    const py = ring[0][1];
+    const cx = Math.floor(px / grid) * grid + grid / 2;
+    const cy = Math.floor(py / grid) * grid + grid / 2;
+    const key = `${cx},${cy}`;
+    const w = Number(f.tags?.point_count ?? f.tags?.count ?? 1);
+    const cur = cells.get(key);
+    if (cur) cur.count += w;
+    else cells.set(key, { x: cx, y: cy, count: w });
+  }
+  return [...cells.values()].map((c, i) => ({
+    type: 1,
+    geometry: [[[c.x, c.y]]],
+    tags: { point_count: c.count, count: c.count },
+    id: i,
+  }));
+}
+
+/** Per-cell MVT points for heatmap density (cluster when zoomed out to stay within Worker CPU). */
 async function writeGridHeatmapTiles(
   writer: S2PMTilesWriter,
   rows: GridRow[],
@@ -66,47 +95,34 @@ async function writeGridHeatmapTiles(
   const zoomLevels = maxZ - minZ + 1;
 
   for (let z = minZ; z <= maxZ; z++) {
-    const buckets = new Map<
-      string,
-      { x: number; y: number; count: number; lngSum: number; latSum: number; n: number }
-    >();
+    const buckets = new Map<string, { x: number; y: number; features: GeoJsonVtTile["features"] }>();
 
     for (const row of rows) {
       const { x, y } = lngLatToTile(row.lng, row.lat, z);
       const key = `${x},${y}`;
-      let b = buckets.get(key);
-      if (!b) {
-        b = { x, y, count: 0, lngSum: 0, latSum: 0, n: 0 };
-        buckets.set(key, b);
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = { x, y, features: [] };
+        buckets.set(key, bucket);
       }
-      b.count += row.count;
-      b.lngSum += row.lng;
-      b.latSum += row.lat;
-      b.n += 1;
+      const [px, py] = tilePoint(row.lng, row.lat, z, x, y);
+      bucket.features.push({
+        type: 1,
+        geometry: [[[px, py]]],
+        tags: { point_count: row.count, count: row.count },
+        id: bucket.features.length,
+      });
     }
 
-    let featId = 0;
-    for (const b of buckets.values()) {
-      const lng = b.lngSum / b.n;
-      const lat = b.latSum / b.n;
-      const [px, py] = tilePoint(lng, lat, z, b.x, b.y);
-      const data = encodeTile({
-        features: [
-          {
-            type: 1,
-            geometry: [[[px, py]]],
-            tags: { point_count: b.count, count: b.count },
-            id: featId++,
-          },
-        ],
-      });
+    for (const bucket of buckets.values()) {
+      const features = z < CLUSTER_BELOW_Z ? clusterFeaturesInTile(bucket.features, z) : bucket.features;
+      const data = encodeTile({ features });
       if (!data) continue;
-      await writer.writeTileXYZ(z, b.x, b.y, data);
+      await writer.writeTileXYZ(z, bucket.x, bucket.y, data);
       written += 1;
     }
 
     await onProgress?.(z - minZ + 1, zoomLevels);
-    // Yield so progress writes flush before the next zoom level hammers CPU.
     await new Promise<void>((r) => setTimeout(r, 0));
   }
 
