@@ -143,8 +143,6 @@ export class P5nMap {
     this.deltaClustered = wantCluster;
     this.ensureFilteredLayer();
     this.raiseBboxLayers();
-    this.flushDeltaPins();
-    this.flushFilteredPins();
   }
 
   /** Wait until pin sources/layers are on the map. */
