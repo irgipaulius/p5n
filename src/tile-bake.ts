@@ -1,9 +1,9 @@
-import { chunkIdFor } from "../shared/tile-chunks";
 import { emit, nowIso, rebuildPinGrid, updateTileManifest, writeDb } from "./db";
 import { buildPmtilesBytes, storePmtiles, type BakeProgress } from "./pmtiles-bake";
 import type { Env } from "./types";
 
-const EXPORT_BATCH = 5000;
+/** Bakes that never finish (Worker CPU kill) leave status stuck mid-phase. */
+const STALE_BAKE_MS = 3 * 60 * 1000;
 
 export interface TileBakeStatus {
   bake_status: string;
@@ -33,9 +33,24 @@ export async function getTileBakeStatus(env: Env): Promise<TileBakeStatus | null
 
 export async function startTileBake(_env: Env): Promise<{ ok: boolean; error?: string }> {
   const db = writeDb(_env);
-  const row = await db.prepare("SELECT bake_status FROM tile_manifest WHERE id = 1").first<{ bake_status: string }>();
+  const row = await db
+    .prepare("SELECT bake_status, bake_started_at FROM tile_manifest WHERE id = 1")
+    .first<{ bake_status: string; bake_started_at: string | null }>();
+
   if (row?.bake_status === "running") {
-    return { ok: false, error: "bake already running" };
+    const started = row.bake_started_at ? Date.parse(row.bake_started_at) : 0;
+    const age = started > 0 ? Date.now() - started : STALE_BAKE_MS + 1;
+    if (age < STALE_BAKE_MS) {
+      return { ok: false, error: "bake already running" };
+    }
+    await db
+      .prepare(
+        `UPDATE tile_manifest
+         SET bake_status = 'error', bake_error = 'previous bake timed out', bake_phase = NULL
+         WHERE id = 1`,
+      )
+      .run();
+    await emit(db, "tile bake: cleared stale running state", "error");
   }
 
   await db
@@ -123,40 +138,6 @@ export async function runTileBake(env: Env): Promise<void> {
     await emit(db, `tile bake: uploading ${(bytes.byteLength / 1024 / 1024).toFixed(2)} MB PMTiles (${tileCount} tiles)…`);
     await storePmtiles(env, db, r2Key, bytes);
     await setBakeProgress(db, { phase: "upload", done: 1, total: 1 });
-
-    const counts = new Map<string, number>();
-    let offset = 0;
-    while (offset < placeCount) {
-      const batch = await db
-        .prepare(`SELECT lat, lng FROM places WHERE lat IS NOT NULL ORDER BY place_id LIMIT ? OFFSET ?`)
-        .bind(EXPORT_BATCH, offset)
-        .all<{ lat: number; lng: number }>();
-
-      const rows = batch.results ?? [];
-      if (rows.length === 0) break;
-
-      for (const row of rows) {
-        const cid = chunkIdFor(row.lat, row.lng);
-        counts.set(cid, (counts.get(cid) ?? 0) + 1);
-      }
-      offset += rows.length;
-    }
-
-    for (const [chunkId, count] of counts) {
-      await db
-        .prepare(
-          `INSERT INTO tile_chunks (chunk_id, version, built_at, place_count, r2_key, bytes, data)
-           VALUES (?, ?, ?, ?, ?, 0, NULL)
-           ON CONFLICT(chunk_id) DO UPDATE SET
-             version = excluded.version,
-             built_at = excluded.built_at,
-             place_count = excluded.place_count,
-             bytes = 0,
-             data = NULL`,
-        )
-        .bind(chunkId, version, nowIso(), count, `grid/${chunkId}`)
-        .run();
-    }
 
     await updateTileManifest(db, version, placeCount, r2Key, bytes.byteLength, gridCells, tileCount);
     await db

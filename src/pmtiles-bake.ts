@@ -1,8 +1,8 @@
 /**
  * Worker-side PMTiles bakery — dashboard POST /api/tiles/bake.
- * Heatmap density only (pin_grid → MVT). Individual pins load via /api/pins/bbox on zoom-in.
+ * pin_grid → MVT heatmap (direct tile bucketing, no geojson-vt tree walk).
+ * Individual pins load via /api/pins/bbox when zoomed in.
  */
-import geojsonvt from "geojson-vt";
 import vtpbf from "vt-pbf";
 import { BufferWriter, S2PMTilesWriter, TileType } from "s2-pmtiles";
 import { nowIso } from "./db";
@@ -10,30 +10,15 @@ import type { Env } from "./types";
 
 const LAYER = "pins";
 const EXTENT = 4096;
-const GRID_HEATMAP_MAX_Z = 10;
+const GRID_HEATMAP_MAX_Z = 8;
 
-type PinFeature = {
-  type: "Feature";
-  geometry: { type: "Point"; coordinates: [number, number] };
-  properties?: Record<string, unknown>;
-};
-
-type PinFeatureCollection = {
-  type: "FeatureCollection";
-  features: PinFeature[];
-};
-
-type GeoJsonVtIndex = {
-  tileCoords: Array<{ z: number; x: number; y: number }>;
-  getTile: (z: number, x: number, y: number) => GeoJsonVtTile | null;
-};
+type GridRow = { g4: string; count: number; lat: number; lng: number };
 
 type GeoJsonVtTile = {
   features: Array<{
-    geometry: number[][] | number[][][];
+    geometry: number[][][];
     tags?: Record<string, unknown>;
-    properties?: Record<string, unknown>;
-    id?: number | string;
+    id?: number;
     type?: number;
   }>;
 };
@@ -50,72 +35,81 @@ function encodeTile(tile: GeoJsonVtTile | null): Uint8Array | null {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
-function childTiles(z: number, x: number, y: number): Array<{ z: number; x: number; y: number }> {
-  const nz = z + 1;
-  const nx = x * 2;
-  const ny = y * 2;
-  return [
-    { z: nz, x: nx, y: ny },
-    { z: nz, x: nx + 1, y: ny },
-    { z: nz, x: nx, y: ny + 1 },
-    { z: nz, x: nx + 1, y: ny + 1 },
-  ];
+function lngLatToTile(lng: number, lat: number, z: number): { x: number; y: number } {
+  const n = 1 << z;
+  const x = Math.min(n - 1, Math.max(0, Math.floor(((lng + 180) / 360) * n)));
+  const latRad = (lat * Math.PI) / 180;
+  const y = Math.min(
+    n - 1,
+    Math.max(0, Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n)),
+  );
+  return { x, y };
 }
 
-function enumerateTiles(index: GeoJsonVtIndex, minZ: number, maxZ: number): Array<{ z: number; x: number; y: number }> {
-  const out: Array<{ z: number; x: number; y: number }> = [];
-  const queue: Array<{ z: number; x: number; y: number }> = [...index.tileCoords];
-  const queued = new Set<string>();
-  for (const c of index.tileCoords) queued.add(`${c.z}:${c.x}:${c.y}`);
-
-  while (queue.length > 0) {
-    const { z, x, y } = queue.shift()!;
-    if (z > maxZ) continue;
-
-    const tile = index.getTile(z, x, y);
-    if (!tile?.features?.length) continue;
-
-    if (z >= minZ) out.push({ z, x, y });
-
-    if (z < maxZ) {
-      for (const child of childTiles(z, x, y)) {
-        const key = `${child.z}:${child.x}:${child.y}`;
-        if (queued.has(key)) continue;
-        queued.add(key);
-        queue.push(child);
-      }
-    }
-  }
-
-  return out;
+function tilePoint(lng: number, lat: number, z: number, x: number, y: number): [number, number] {
+  const px = ((lng + 180) / 360) * (1 << z) * EXTENT;
+  const latRad = (lat * Math.PI) / 180;
+  const py = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * (1 << z) * EXTENT;
+  return [Math.round(px - x * EXTENT), Math.round(py - y * EXTENT)];
 }
 
-async function writeIndexTiles(
+/** Bucket pre-aggregated grid cells into MVT tiles — O(cells × zoom), worker-safe. */
+async function writeGridHeatmapTiles(
   writer: S2PMTilesWriter,
-  index: GeoJsonVtIndex,
+  rows: GridRow[],
   minZ: number,
   maxZ: number,
+  onProgress?: (done: number, total: number) => Promise<void>,
 ): Promise<number> {
   let written = 0;
-  for (const { z, x, y } of enumerateTiles(index, minZ, maxZ)) {
-    const tile = index.getTile(z, x, y);
-    const data = encodeTile(tile);
-    if (!data) continue;
-    await writer.writeTileXYZ(z, x, y, data);
-    written += 1;
-  }
-  return written;
-}
+  const zoomLevels = maxZ - minZ + 1;
 
-function gridToGeoJson(rows: Array<{ g4: string; count: number; lat: number; lng: number }>): PinFeatureCollection {
-  return {
-    type: "FeatureCollection",
-    features: rows.map((r) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [r.lng, r.lat] },
-      properties: { count: r.count, point_count: r.count, g4: r.g4, grid: true },
-    })),
-  };
+  for (let z = minZ; z <= maxZ; z++) {
+    const buckets = new Map<
+      string,
+      { x: number; y: number; count: number; lngSum: number; latSum: number; n: number }
+    >();
+
+    for (const row of rows) {
+      const { x, y } = lngLatToTile(row.lng, row.lat, z);
+      const key = `${x},${y}`;
+      let b = buckets.get(key);
+      if (!b) {
+        b = { x, y, count: 0, lngSum: 0, latSum: 0, n: 0 };
+        buckets.set(key, b);
+      }
+      b.count += row.count;
+      b.lngSum += row.lng;
+      b.latSum += row.lat;
+      b.n += 1;
+    }
+
+    let featId = 0;
+    for (const b of buckets.values()) {
+      const lng = b.lngSum / b.n;
+      const lat = b.latSum / b.n;
+      const [px, py] = tilePoint(lng, lat, z, b.x, b.y);
+      const data = encodeTile({
+        features: [
+          {
+            type: 1,
+            geometry: [[[px, py]]],
+            tags: { point_count: b.count, count: b.count },
+            id: featId++,
+          },
+        ],
+      });
+      if (!data) continue;
+      await writer.writeTileXYZ(z, b.x, b.y, data);
+      written += 1;
+    }
+
+    await onProgress?.(z - minZ + 1, zoomLevels);
+    // Yield so progress writes flush before the next zoom level hammers CPU.
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+
+  return written;
 }
 
 export async function buildPmtilesBytes(
@@ -126,12 +120,7 @@ export async function buildPmtilesBytes(
 
   const gridRows =
     (
-      await db.prepare("SELECT g4, count, lat, lng FROM pin_grid ORDER BY g4").all<{
-        g4: string;
-        count: number;
-        lat: number;
-        lng: number;
-      }>()
+      await db.prepare("SELECT g4, count, lat, lng FROM pin_grid ORDER BY g4").all<GridRow>()
     ).results ?? [];
 
   if (gridRows.length === 0) {
@@ -147,21 +136,15 @@ export async function buildPmtilesBytes(
     throw new Error("no places with coordinates to bake");
   }
 
-  await onProgress({ phase: "tile", done: 0, total: 1 });
-
-  const gridIndex = geojsonvt(gridToGeoJson(gridRows), {
-    maxZoom: GRID_HEATMAP_MAX_Z,
-    indexMaxZoom: 5,
-    indexMaxPoints: 100000,
-    tolerance: 2,
-    extent: EXTENT,
-    buffer: 64,
-  }) as unknown as GeoJsonVtIndex;
+  await onProgress({ phase: "tile", done: 0, total: GRID_HEATMAP_MAX_Z + 1 });
 
   const writer = new S2PMTilesWriter(new BufferWriter(), TileType.Pbf);
-  const tileCount = await writeIndexTiles(writer, gridIndex, 0, GRID_HEATMAP_MAX_Z);
-  await onProgress({ phase: "tile", done: 1, total: 1 });
+  const tileCount = await writeGridHeatmapTiles(writer, gridRows, 0, GRID_HEATMAP_MAX_Z, async (done, total) => {
+    await onProgress({ phase: "tile", done, total });
+  });
+  await onProgress({ phase: "tile", done: GRID_HEATMAP_MAX_Z + 1, total: GRID_HEATMAP_MAX_Z + 1 });
 
+  await onProgress({ phase: "upload", done: 0, total: 1 });
   await writer.commit({
     name: "p5n-pins",
     description: "Park5Night heatmap density (pins via bbox API when zoomed in)",
