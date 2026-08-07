@@ -5,6 +5,7 @@ import { scheduleViewportEnrich } from "./enrich/viewport-enrich";
 import { resolveInitialView, type InitialView, type InitialViewOptions } from "./geo/initial-view";
 import {
   addGeoJsonPinLayers,
+  addBboxPinLayers,
   addGridPinLayers,
   addPinLayers,
   baseLayerIds,
@@ -138,7 +139,7 @@ export class P5nMap {
     if (wantCluster) {
       addGeoJsonPinLayers(this.map, this.deltaSourceId, true);
     } else {
-      addGeoJsonPinLayers(this.map, this.deltaSourceId, false);
+      addBboxPinLayers(this.map, this.deltaSourceId);
     }
     this.deltaClustered = wantCluster;
     this.ensureFilteredLayer();

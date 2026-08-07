@@ -306,6 +306,42 @@ export function addGeoJsonPinLayers(map: maplibregl.Map, sourceId: string, clust
   }
 }
 
+/** Viewport bbox pins — circles + icons only (no clustering). */
+export function addBboxPinLayers(map: maplibregl.Map, sourceId = "pins-delta"): void {
+  if (!map.getSource(sourceId)) return;
+  const circleId = `${sourceId}-circles`;
+  const symbolId = `${sourceId}-symbols`;
+  if (!map.getLayer(circleId)) {
+    map.addLayer({
+      id: circleId,
+      type: "circle",
+      source: sourceId,
+      minzoom: GRID_BBOX_MIN_ZOOM,
+      paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 7, 12, 11, 16, 14],
+        "circle-color": typeColorMatch(),
+        "circle-stroke-width": 2.5,
+        "circle-stroke-color": "#0f172a",
+        "circle-opacity": 0.95,
+      },
+    });
+  }
+  if (!map.getLayer(symbolId)) {
+    map.addLayer({
+      id: symbolId,
+      type: "symbol",
+      source: sourceId,
+      minzoom: 9,
+      layout: {
+        "icon-image": iconImageExpression(),
+        "icon-size": ["interpolate", ["linear"], ["zoom"], 9, 0.95, 13, 1.15, 17, 1.45],
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
+      },
+    });
+  }
+}
+
 export function vectorPinLayerIds(sourceId = "pins-baked"): string[] {
   return [`${sourceId}-heatmap`, `${sourceId}-circles`, `${sourceId}-symbols`];
 }
